@@ -51,3 +51,12 @@ create index if not exists delivery_items_store_item_code_idx on delivery_items 
 create index if not exists delivery_items_store_item_name_idx on delivery_items (store_code, item_name);
 create index if not exists delivery_items_store_created_at_idx on delivery_items (store_code, created_at);
 create index if not exists deliveries_store_date_idx on deliveries (store_code, delivery_date);
+
+-- This backend only ever talks to Supabase with the service_role key
+-- (src/lib/supabase.ts), which bypasses RLS regardless of these settings.
+-- Enabling RLS with no policies just locks the anon/publishable and
+-- authenticated keys out of these tables entirely, since nothing in this
+-- architecture is meant to hit Supabase directly except this server.
+alter table stores enable row level security;
+alter table deliveries enable row level security;
+alter table delivery_items enable row level security;
