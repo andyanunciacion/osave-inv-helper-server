@@ -62,6 +62,19 @@ deliveriesRouter.post("/", async (req, res) => {
 
   const input = parsed.data;
 
+  // The frontend's store-session flow never registers a store ahead of time —
+  // staff just type/scan a code and start uploading (main-file.md §6 flow A).
+  // Auto-register it here so deliveries.store_code's FK doesn't block the
+  // first delivery for a new store; ignoreDuplicates means an existing
+  // store's name is never overwritten.
+  const { error: storeUpsertError } = await supabase
+    .from("stores")
+    .upsert({ store_code: input.store_code, name: input.store_code }, { onConflict: "store_code", ignoreDuplicates: true });
+
+  if (storeUpsertError) {
+    return res.status(500).json({ error: "internal_error", message: storeUpsertError.message });
+  }
+
   const { data: delivery, error: deliveryError } = await supabase
     .from("deliveries")
     .insert({
