@@ -4,6 +4,7 @@ import { normalizeStoreCode } from "../lib/normalize.js";
 export const deliveryItemSchema = z.object({
   item_code: z.string().trim().min(1).nullish(),
   item_name: z.string().trim().min(1),
+  unit_count: z.number().nonnegative().nullish(),
   quantity: z.number().nonnegative().nullish(),
   unit: z.enum(["BOX", "PIECE"]).nullish(),
   item_price: z.number().nonnegative().nullish(),
@@ -17,7 +18,7 @@ export const createDeliverySchema = z.object({
   delivery_date: z.string().refine((v) => !Number.isNaN(Date.parse(v)), {
     message: "delivery_date must be a valid date",
   }),
-  receipt_store_code: z.string().trim().nullish(),
+  receipt_store_code: z.string().trim().min(1).transform(normalizeStoreCode),
   uploaded_by: z.string().trim().nullish(),
   items: z.array(deliveryItemSchema).min(1),
 });

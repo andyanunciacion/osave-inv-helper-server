@@ -29,7 +29,7 @@ Database schema: `supabase/schema.sql` is not wired into any migration tooling �
 
 ## Architecture
 
-`src/index.ts` is the only entry point: it mounts three routers under `/api` (`stores`, `deliveries`, `search`) plus a `/health` check. Each route file in `src/routes/` talks directly to Supabase via the client in `src/lib/supabase.ts` (service-role key — this server is trusted, not RLS-scoped) — there's no repository/service layer in between.
+`src/index.ts` is the only entry point: it mounts four routers under `/api` (`stores`, `deliveries`, `search`, `ocr`) plus a `/health` check. Each route file in `src/routes/` talks directly to Supabase via the client in `src/lib/supabase.ts` (service-role key — this server is trusted, not RLS-scoped) — there's no repository/service layer in between.
 
 **Data model** (`supabase/schema.sql`, mirrors `main-file.md` §4): `stores` → `deliveries` (PK `delivery_code`, sourced from the receipt's printed "Inv. Tran. No.") → `delivery_items`. Two duplicate-detection layers matter for anyone touching `deliveries.ts`:
 - Re-uploading the same `delivery_code` conflicts on the `deliveries` primary key itself — caught as a Postgres `23505` error.
@@ -42,6 +42,8 @@ Database schema: `supabase/schema.sql` is not wired into any migration tooling �
 - `q` absent, date/range present → `mode: "unified"`: a flat, ungrouped list of items across every delivery in range, each carrying its own `delivery_date`, sorted by date desc then `item_code`. Paginated 50 items/page. This mode exists because a date-only search means "what came in that day," not "which deliveries arrived" (`main-file.md` §6).
 
 Both search modes, plus `GET /api/deliveries/recent`, do their grouping/sorting/pagination **in application code** (fetch matching rows, then sort/slice in JS) rather than in SQL, because `store_code` is denormalized onto `delivery_items` but `delivery_date` lives only on `deliveries` — joining and paginating that cleanly in one PostgREST query wasn't worth it at this project's scale (a handful of stores, a few concurrent users). If usage ever grows past that, this is the first place to revisit.
+
+**OCR (`POST /api/ocr`)** sends the photo to Google Cloud Vision and parses it in `src/lib/receipt-parser.ts` from *word bounding boxes*, not `fullTextAnnotation.text` — Vision emits table cells column-by-column, so the plain text has no row structure, and the photos are tilted/curled (the tilt differs by ~5° between the left and right of one page), so rows are rebuilt by linking neighbouring words and then pairing each row's left half (SAN + description) with its right half (unit/qty/price/total). Don't "simplify" this back to splitting text on whitespace or to a single global rotation. Cells Vision can't read come back as `""`; the parser never guesses a value. Every request costs a Vision call, so it's rate-limited (`OCR_RATE_LIMIT_PER_MINUTE`, `OCR_DAILY_LIMIT`) and validates its input before calling Vision. It also rejects a receipt whose "To" store code doesn't match the submitted `store_code` (409), and `POST /api/deliveries` re-checks that.
 
 `store_code` is normalized (trim + uppercase) via a zod `.transform()` in every validator that accepts one (`src/validators/delivery.ts`, `src/routes/stores.ts`), backed by `src/lib/normalize.ts` — this exists because the frontend does the same normalization client-side and an inconsistently-cased QR code could otherwise fork a store's data across rows.
 

@@ -5,7 +5,7 @@ import { createDeliverySchema, recentQuerySchema } from "../validators/delivery.
 export const deliveriesRouter = Router();
 
 const DELIVERY_ITEM_COLUMNS =
-  "id, delivery_code, store_code, item_code, item_name, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
+  "id, delivery_code, store_code, item_code, item_name, unit_count, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
 
 // Registered before "/:delivery_code" so "recent" isn't swallowed by the param route.
 deliveriesRouter.get("/recent", async (req, res) => {
@@ -62,6 +62,12 @@ deliveriesRouter.post("/", async (req, res) => {
 
   const input = parsed.data;
 
+  // A receipt printed for another store must never be saved to this store's
+  // records. Checked before anything is written, including the store upsert.
+  if (input.receipt_store_code !== input.store_code) {
+    return res.json({ status: "store_mismatch", delivery: null, acceptedItems: [], rejectedItems: [] });
+  }
+
   // The frontend's store-session flow never registers a store ahead of time —
   // staff just type/scan a code and start uploading (main-file.md §6 flow A).
   // Auto-register it here so deliveries.store_code's FK doesn't block the
@@ -75,30 +81,48 @@ deliveriesRouter.post("/", async (req, res) => {
     return res.status(500).json({ error: "internal_error", message: storeUpsertError.message });
   }
 
-  const { data: delivery, error: deliveryError } = await supabase
+  const duplicateDelivery = { status: "duplicate_delivery", delivery: null, acceptedItems: [], rejectedItems: [] };
+
+  const { data: inserted, error: deliveryError } = await supabase
     .from("deliveries")
     .insert({
       delivery_code: input.delivery_code,
       store_code: input.store_code,
       warehouse_code: input.warehouse_code ?? null,
       delivery_date: input.delivery_date,
-      receipt_store_code: input.receipt_store_code ?? null,
+      receipt_store_code: input.receipt_store_code,
       uploaded_by: input.uploaded_by ?? null,
       status: "confirmed",
     })
     .select()
     .single();
 
+  let delivery = inserted;
+  let appending = false;
+
   if (deliveryError) {
-    if (deliveryError.code === "23505") {
-      return res.json({
-        status: "duplicate_delivery",
-        delivery: null,
-        acceptedItems: [],
-        rejectedItems: [],
-      });
+    if (deliveryError.code !== "23505") {
+      return res.status(500).json({ error: "internal_error", message: deliveryError.message });
     }
-    return res.status(500).json({ error: "internal_error", message: deliveryError.message });
+
+    // One receipt spans several photographed pages ("Page 10 of 12"), and
+    // every page prints the same "Inv. Tran. No.". A later page for the same
+    // store appends its items to the delivery already stored; the same code
+    // under another store is a genuine duplicate.
+    const { data: existing, error: existingError } = await supabase
+      .from("deliveries")
+      .select("*")
+      .eq("delivery_code", input.delivery_code)
+      .maybeSingle();
+
+    if (existingError) {
+      return res.status(500).json({ error: "internal_error", message: existingError.message });
+    }
+    if (!existing || existing.store_code !== input.store_code) {
+      return res.json(duplicateDelivery);
+    }
+    delivery = existing;
+    appending = true;
   }
 
   const rowsToInsert = input.items.map((item) => ({
@@ -106,6 +130,7 @@ deliveriesRouter.post("/", async (req, res) => {
     store_code: input.store_code,
     item_code: item.item_code ?? null,
     item_name: item.item_name,
+    unit_count: item.unit_count ?? null,
     quantity: item.quantity ?? null,
     unit: item.unit ?? null,
     item_price: item.item_price ?? null,
@@ -148,6 +173,12 @@ deliveriesRouter.post("/", async (req, res) => {
     }
   } else {
     return res.status(500).json({ error: "internal_error", message: bulkError.message });
+  }
+
+  // Nothing new on a page that appends to an existing delivery means this
+  // exact page was already uploaded.
+  if (appending && acceptedItems.length === 0) {
+    return res.json(duplicateDelivery);
   }
 
   res.json({

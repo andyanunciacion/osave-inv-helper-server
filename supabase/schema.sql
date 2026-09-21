@@ -32,7 +32,8 @@ create table if not exists delivery_items (
   store_code text references stores(store_code),  -- denormalized for fast search
   item_code text,                      -- "SAN", or a slugified fallback (§4 open decision)
   item_name text not null,             -- "Description"
-  quantity numeric,                    -- "Unit/Box"
+  unit_count numeric,                  -- "Unit/Box" (pieces per box, e.g. 12, 96, 288)
+  quantity numeric,                    -- "Qty" (how many units of `unit` were delivered)
   unit text,                           -- "UOM" ("BOX" or "PIECE")
   item_price numeric,                  -- "Sales Price"
   total_item_price numeric,            -- "Total" — extracted as printed, not recomputed
