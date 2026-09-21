@@ -27,8 +27,9 @@ This document covers architecture, data model, business rules, and a phased buil
 |---|---|---|
 | SAN | `item_code` | |
 | Description | `item_name` | |
-| Unit/Box | `quantity` | |
+| Unit/Box | `unit_count` | pieces per box (e.g. 12, 96, 288) |
 | UOM | `unit` | "BOX" or "PIECE" |
+| Qty | `quantity` | how many units of `unit` were delivered |
 | Sales Price | `item_price` | |
 | Total | `total_item_price` | printed value — extract, don't recompute (see §7) |
 
@@ -108,7 +109,8 @@ create table delivery_items (
   store_code text references stores(store_code),  -- denormalized for fast search
   item_code text,                     -- OCR'd from "SAN"
   item_name text not null,            -- OCR'd from "Description"
-  quantity numeric,                   -- OCR'd from "Unit/Box"
+  unit_count numeric,                 -- OCR'd from "Unit/Box" (pieces per box)
+  quantity numeric,                   -- OCR'd from "Qty"
   unit text,                          -- OCR'd from "UOM" ("BOX" or "PIECE")
   item_price numeric,                 -- OCR'd from "Sales Price"
   total_item_price numeric,           -- OCR'd from "Total" — extracted as printed,
@@ -129,7 +131,7 @@ create index on delivery_items (store_code, created_at);
 
 I'd default to option 1 for MVP — it's a small addition and keeps the rule airtight.
 
-**On `total_item_price`:** the receipt prints quantity, unit price, and total together, so extract all three directly rather than computing total yourself. That printed total is actually useful as a free sanity check: if `quantity × item_price` doesn't roughly match the extracted `total_item_price`, that's a signal one of the three fields was misread by OCR — worth flagging in the review screen rather than silently trusting whichever value you happened to compute.
+**On `total_item_price`:** the receipt prints quantity, unit price, and total together, so extract all three directly rather than computing total yourself. That printed total is actually useful as a free sanity check: if `quantity × unit_count × item_price` doesn't roughly match the extracted `total_item_price` (on the sample receipts, `Total = Qty × Unit/Box × Sales Price`, so `item_price` is per piece), that's a signal one of the three fields was misread by OCR — worth flagging in the review screen rather than silently trusting whichever value you happened to compute.
 
 ---
 
@@ -140,7 +142,8 @@ I'd default to option 1 for MVP — it's a small addition and keeps the rule air
 3. Within a delivery, `item_code` must be unique — re-submitting the same item under the same delivery code is **rejected**, not merged or overwritten.
 4. Different items freely share the same `delivery_code` — that's the normal case (a delivery usually has many items).
 5. Duplicate rejection happens at the database level (the `unique` constraint, and the `deliveries` primary key) *and* is surfaced clearly in the UI at review time, so staff know exactly which line — or which whole receipt — failed and why.
-6. The receipt's printed "To" store code (`receipt_store_code`) is checked against the session's `store_code`. A mismatch **warns, doesn't block** — staff occasionally do need to log a delivery under a different store than the receipt implies — but it's flagged so it isn't a silent mistake.
+6. The receipt's printed "To" store code (`receipt_store_code` — the first number in the "To:" line; the address after it is ignored) must match the session's `store_code`. A mismatch is **rejected**, so a receipt for one store can't land in another store's records: `/api/ocr` returns 409 `store_mismatch` before any items are returned, and `POST /api/deliveries` returns `status: "store_mismatch"` and writes nothing. (This replaces the earlier warn-only rule.) `receipt_store_code` is **required** on `POST /api/deliveries` (400 if missing or blank), including for manual entry — staff type it from the paper receipt. If OCR couldn't read the "To" code, `/api/ocr` returns it blank instead of rejecting, and the user must fill it in before the delivery can be saved.
+7. A physical receipt can span several photographed pages ("Page 10 of 12"), and every page prints the same "Inv. Tran. No.". A later page for the **same store** appends its items to the existing delivery (rule 3 still rejects individual duplicate items); a page whose items are all duplicates, or the same code under a **different store**, comes back as `duplicate_delivery`.
 
 ---
 
@@ -155,8 +158,8 @@ Enter or scan store code → store it in `localStorage` → every screen after t
 3. Queue the photo(s) for OCR; user is free to keep using the app.
 4. When OCR returns, show a **review/edit screen** with:
    - The extracted header fields — store, warehouse, transaction date, and the **Inv. Tran. No. shown prominently and editable**, since it's now the primary key and a misread here matters more than a misread item name.
-   - A warning if the receipt's store doesn't match the current session's store (rule 6, §5).
-   - The parsed item rows (code, description, quantity, unit, price, total), with any quantity×price/total mismatches flagged (§4).
+   - (A receipt for a different store never gets this far — `/api/ocr` rejects it, rule 6, §5.)
+   - The parsed item rows (code, description, unit count, quantity, unit, price, total), with any quantity×unit count×price/total mismatches flagged (§4).
 5. On confirm, the delivery and its rows are written. A duplicate `delivery_code` (same receipt uploaded twice) is rejected at the `deliveries` table level; a duplicate `(delivery_code, item_code)` is rejected at the item level — both surfaced per-row, not as a whole-batch failure.
 
 **C. Search flow**

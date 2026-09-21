@@ -5,7 +5,7 @@ import { searchQuerySchema } from "../validators/delivery.js";
 export const searchRouter = Router();
 
 const DELIVERY_ITEM_COLUMNS =
-  "id, delivery_code, store_code, item_code, item_name, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
+  "id, delivery_code, store_code, item_code, item_name, unit_count, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
 
 const GROUPED_DEFAULT_LIMIT = 15;
 const UNIFIED_DEFAULT_LIMIT = 50;
@@ -26,6 +26,7 @@ type ItemRow = {
   delivery_code: string;
   item_code: string | null;
   item_name: string;
+  unit_count: number | null;
   quantity: number | null;
   unit: string | null;
   item_price: number | null;

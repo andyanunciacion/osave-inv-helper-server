@@ -47,7 +47,8 @@ interface DeliveryItem {
   store_code: string;           // denormalized, per §4
   item_code: string | null;
   item_name: string;
-  quantity: number | null;
+  unit_count: number | null;    // receipt's "Unit/Box" (pieces per box)
+  quantity: number | null;      // receipt's "Qty"
   unit: ItemUnit | null;
   item_price: number | null;
   total_item_price: number | null;
@@ -79,6 +80,7 @@ receipt (header + all item rows) — not one call per item.
 interface NewDeliveryItemInput {
   item_code: string | null;
   item_name: string;
+  unit_count: number | null;
   quantity: number | null;
   unit: ItemUnit | null;
   item_price: number | null;
@@ -90,7 +92,7 @@ interface NewDeliveryInput {
   store_code: string;
   warehouse_code: string | null;
   delivery_date: string;
-  receipt_store_code: string | null;
+  receipt_store_code: string;     // required, non-empty — see store mismatch below
   items: NewDeliveryItemInput[];
 }
 ```
@@ -99,7 +101,7 @@ interface NewDeliveryInput {
 needs to reproduce this exact result shape, not just the constraint:
 
 ```ts
-type CreateDeliveryStatus = "success" | "duplicate_delivery" | "partial";
+type CreateDeliveryStatus = "success" | "duplicate_delivery" | "partial" | "store_mismatch";
 
 interface RejectedItem {
   item_code: string | null;
@@ -109,16 +111,23 @@ interface RejectedItem {
 
 interface CreateDeliveryResult {
   status: CreateDeliveryStatus;
-  delivery: Delivery | null;      // null only on "duplicate_delivery"
+  delivery: Delivery | null;      // null on "duplicate_delivery" and "store_mismatch"
   acceptedItems: DeliveryItem[];
   rejectedItems: RejectedItem[];
 }
 ```
 
 Behavior the review screen depends on:
-- **Whole-receipt rejection**: if `delivery_code` already exists, return
-  `status: "duplicate_delivery"`, `delivery: null`, both item arrays empty.
-  Nothing is written. The UI (`use-delivery-draft.ts`'s `editAgain()`) sends
+- **Multi-page receipts**: every photographed page of one receipt prints the
+  same `delivery_code` ("Page 10 of 12"). If `delivery_code` already exists
+  **for the same `store_code`**, the submitted items are appended to that
+  delivery (`delivery` in the response is the existing row; per-row
+  duplicates still go to `rejectedItems`).
+- **Whole-receipt rejection**: `status: "duplicate_delivery"`, `delivery:
+  null`, both item arrays empty, nothing written — when `delivery_code`
+  already exists under a **different** store, or when it exists for this
+  store and *every* submitted item was a duplicate (the page was already
+  uploaded). The UI (`use-delivery-draft.ts`'s `editAgain()`) sends
   the user back to editing with their typed rows intact — it does not refetch
   anything, so the rejection must be synchronous/immediate in the response,
   not a side-channel notification.
@@ -136,11 +145,17 @@ Behavior the review screen depends on:
 - Rows with an empty/blank `item_name` are filtered out client-side before
   the call is even made (see `confirm()`) — the backend doesn't need to
   handle "empty item" as its own case.
-- `store_code` and `receipt_store_code` mismatch (§5 rule 6) is **not**
-  enforced or blocked server-side in this contract — it's a client-only
-  warning (`storeMismatch` in `useDeliveryDraft`, computed by string
-  comparison) shown before confirm. The write itself always succeeds
-  regardless of mismatch; the backend doesn't need to reject or flag it.
+- **Store mismatch is now blocked server-side** (`main-file.md` §5 rule 6,
+  changed from the earlier warn-only behavior). `receipt_store_code` is now
+  **required and non-empty** (400 `invalid_body` otherwise — manual entry
+  must include it too). If it (after trim + uppercase) differs from
+  `store_code`, the response is `status: "store_mismatch"`, `delivery: null`,
+  both item arrays empty, HTTP 200, nothing written — same shape/convention
+  as `duplicate_delivery`.
+  The frontend's own `storeMismatch` warning can become a hard block, but the
+  server no longer relies on it.
+- `unit_count` (receipt's "Unit/Box") is a new optional numeric field on each
+  item, alongside `quantity` (now the receipt's "Qty" column).
 
 ---
 
@@ -270,7 +285,8 @@ deliberately mocked or postponed:
     localId: string;            // client-generated, not persisted
     item_code: string;
     item_name: string;
-    quantity: string;           // note: strings, for controlled-input editing
+    unit_count: string;         // "Unit/Box"
+    quantity: string;           // "Qty" — note: strings, for controlled-input editing
     unit: string;
     item_price: string;
     total_item_price: string;
@@ -288,6 +304,29 @@ deliberately mocked or postponed:
   (`toNumberOrNull`/`toItemUnitOrNull` in `use-delivery-draft.ts`). An OCR
   proxy that returns numbers instead of strings would need an adapter, not
   a hook change.
+
+  **As built — `POST /api/ocr`** (`multipart/form-data`):
+  - Fields: `image` (file, `image/*`, ≤ 10MB) and **`store_code`** (text, the
+    session's store; required, normalized trim + uppercase).
+  - 200 → `{ header, items }` as above, minus `localId` (client-generated).
+    Numbers come back as plain strings with thousands separators and `$`
+    stripped (`"1776.00"`, not `"1,776.00"`), so they parse directly. A field
+    the OCR couldn't read is `""` — including individual cells inside a row
+    (photographed receipts routinely lose a few), so the review screen must
+    let the user fill blanks. `header.delivery_date` is `yyyy-MM-dd`;
+    `header.warehouse_code` is the whole "From:" value (e.g. `"BUN DC"`);
+    `header.receipt_store_code` is the first number of the "To:" line.
+  - **409** `{ error: "store_mismatch", message, store_code,
+    receipt_store_code }` when the receipt's "To" store isn't `store_code`
+    (see `main-file.md` §5 rule 6). Not returned if the "To" code is
+    unreadable — `receipt_store_code` is just `""` in a 200.
+  - 400 `missing_image` / `invalid_file_type` / `invalid_body` /
+    `file_too_large`; 429 `rate_limited` / `daily_limit_reached`; 502
+    `ocr_failed`.
+  - `unit_count` is `"Unit/Box"` and `quantity` is `"Qty"`. `unit` is `"BOX"`
+    or `"PIECE"`, or `""` if the UOM cell wasn't read.
+  - One call handles one photographed page; a multi-page receipt is several
+    calls whose items are then submitted with the same `delivery_code` (§2).
 
 - **Auth / `uploaded_by`**: currently hardcoded to `"prototype-session"`.
   No real user/session identity exists yet on the frontend.
