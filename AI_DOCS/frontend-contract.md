@@ -109,11 +109,19 @@ interface RejectedItem {
   reason: "duplicate_item_code";
 }
 
+interface MergedItem {
+  item_code: string | null;
+  item_name: string;
+  mergedCount: number;     // how many submitted rows were combined into this one (>= 2)
+  fieldsDisagreed: boolean; // unit/unit_count/item_price/item_name differed between the merged rows
+}
+
 interface CreateDeliveryResult {
   status: CreateDeliveryStatus;
   delivery: Delivery | null;      // null on "duplicate_delivery" and "store_mismatch"
   acceptedItems: DeliveryItem[];
   rejectedItems: RejectedItem[];
+  mergedItems: MergedItem[];      // always present, [] when nothing was merged
 }
 ```
 
@@ -131,17 +139,27 @@ Behavior the review screen depends on:
   the user back to editing with their typed rows intact — it does not refetch
   anything, so the rejection must be synchronous/immediate in the response,
   not a side-channel notification.
-- **Per-row rejection, not batch failure**: a duplicate `item_code` *within
-  the same submitted batch* is dropped into `rejectedItems`, and every other
-  row still gets written and returned in `acceptedItems`. Status becomes
-  `"partial"` (not an error) when `rejectedItems.length > 0`, `"success"`
-  otherwise.
+- **Duplicate item codes within one upload are merged, not rejected**
+  (`main-file.md` §5 rule 3, changed from the mock's reject-only behavior —
+  a real sample receipt prints the same item twice on one page). Rows in the
+  submitted batch sharing an `item_code` (or the name-based fallback key
+  below) are combined into a single saved row before `rejectedItems` is even
+  considered: `quantity` and `total_item_price` are summed; `unit_count`,
+  `unit`, `item_price`, and `item_name` are kept from the first occurrence.
+  Each merge is reported in `mergedItems`, with `fieldsDisagreed: true` if
+  the kept fields didn't match across the merged rows (worth calling out on
+  the review/result screen — it can mean the item code was misread rather
+  than genuinely repeated). `rejectedItems`/`"partial"` is now reserved for
+  an item code that collides with a row **already saved** on the delivery —
+  typically from an earlier page (see multi-page above) — where merging
+  would risk silently doubling a resubmitted page.
 - **Fallback dedupe key for code-less items**: when `item_code` is null/empty,
-  the mock keys the duplicate check on `name:<lowercased trimmed item_name>`
-  instead (§4's "open decision", option 1 — this has already been decided,
-  not left open). The backend's uniqueness handling needs an equivalent
-  fallback (e.g. a generated slug column) since a plain
-  `unique(delivery_code, item_code)` constraint can't see name-only rows.
+  both the merge-within-a-batch step above and the duplicate check key on
+  `name:<lowercased trimmed item_name>` instead (§4's "open decision",
+  option 1 — this has already been decided, not left open). The backend's
+  uniqueness handling needs an equivalent fallback (e.g. a generated slug
+  column) since a plain `unique(delivery_code, item_code)` constraint can't
+  see name-only rows.
 - Rows with an empty/blank `item_name` are filtered out client-side before
   the call is even made (see `confirm()`) — the backend doesn't need to
   handle "empty item" as its own case.
@@ -152,8 +170,9 @@ Behavior the review screen depends on:
   `store_code`, the response is `status: "store_mismatch"`, `delivery: null`,
   both item arrays empty, HTTP 200, nothing written — same shape/convention
   as `duplicate_delivery`.
-  The frontend's own `storeMismatch` warning can become a hard block, but the
-  server no longer relies on it.
+  The frontend also hard-blocks it up front (`storeMismatch` in
+  `useDeliveryDraft` disables Confirm, and `/api/ocr` rejects at scan time),
+  but the server no longer relies on that.
 - `unit_count` (receipt's "Unit/Box") is a new optional numeric field on each
   item, alongside `quantity` (now the receipt's "Qty" column).
 
@@ -251,7 +270,7 @@ optional filters if it makes the "recent, capped, no filters" case awkward.
   (`.toISOString().slice(0,10)`) — harmless there since it only affects
   which day cosmetic demo data lands on, but don't copy that line as a
   reference for real date generation.
-- **Quantity × price ≈ total is a soft check, not a constraint**: §4's
+- **Qty × Unit/Box × price ≈ total is a soft check, not a constraint**: §4's
   sanity check (`hasPriceMismatch` in
   `features/deliveries/lib/format.ts`) is purely a UI flag on the review
   screen — it does not block submission and the backend doesn't need to

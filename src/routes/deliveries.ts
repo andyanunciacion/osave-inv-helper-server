@@ -1,11 +1,83 @@
 import { Router } from "express";
 import { supabase } from "../lib/supabase.js";
 import { createDeliverySchema, recentQuerySchema } from "../validators/delivery.js";
+import type { DeliveryItemInput } from "../validators/delivery.js";
 
 export const deliveriesRouter = Router();
 
 const DELIVERY_ITEM_COLUMNS =
   "id, delivery_code, store_code, item_code, item_name, unit_count, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
+
+interface MergedItemInfo {
+  item_code: string | null;
+  item_name: string;
+  mergedCount: number;
+  fieldsDisagreed: boolean;
+}
+
+const sumOrNull = (values: Array<number | null | undefined>): number | null => {
+  const known = values.filter((v): v is number => v !== null && v !== undefined);
+  return known.length === 0 ? null : known.reduce((total, v) => total + v, 0);
+};
+
+// The receipt itself can print the same item twice on one page (e.g. a
+// beer-crate deposit line repeated). Per the store manager's ask, those rows
+// get combined instead of the second being rejected as a duplicate — but
+// only within this one submitted batch; an item that collides with a row
+// already saved from an earlier page is still a genuine duplicate and falls
+// through to the existing 23505 handling below.
+//
+// Grouped by the same key as delivery_items.dedupe_key (supabase/schema.sql)
+// so a merge here can never hide a collision the DB would otherwise catch.
+// `quantity` and `total_item_price` are summed — they're how many units and
+// how much money this page recorded for the item. `unit_count` ("Unit/Box")
+// is a packaging fact, not a count, so it's kept from the first occurrence,
+// not summed: summing it alongside quantity would double-count in the
+// Qty × Unit/Box × Price relationship (main-file.md §4) and make a correctly
+// merged row fail its own price-mismatch check.
+function mergeDuplicateItems(items: DeliveryItemInput[]): {
+  items: DeliveryItemInput[];
+  merged: MergedItemInfo[];
+} {
+  const groups = new Map<string, DeliveryItemInput[]>();
+  for (const item of items) {
+    const key = item.item_code ?? `name:${item.item_name.toLowerCase()}`;
+    groups.set(key, [...(groups.get(key) ?? []), item]);
+  }
+
+  const mergedItems: DeliveryItemInput[] = [];
+  const merged: MergedItemInfo[] = [];
+
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      mergedItems.push(group[0]);
+      continue;
+    }
+
+    const [first, ...rest] = group;
+    const fieldsDisagreed = rest.some(
+      (row) =>
+        row.item_name.trim().toLowerCase() !== first.item_name.trim().toLowerCase() ||
+        (row.unit ?? null) !== (first.unit ?? null) ||
+        (row.unit_count ?? null) !== (first.unit_count ?? null) ||
+        (row.item_price ?? null) !== (first.item_price ?? null),
+    );
+
+    mergedItems.push({
+      ...first,
+      quantity: sumOrNull(group.map((row) => row.quantity)),
+      total_item_price: sumOrNull(group.map((row) => row.total_item_price)),
+    });
+    merged.push({
+      item_code: first.item_code ?? null,
+      item_name: first.item_name,
+      mergedCount: group.length,
+      fieldsDisagreed,
+    });
+  }
+
+  return { items: mergedItems, merged };
+}
 
 // Registered before "/:delivery_code" so "recent" isn't swallowed by the param route.
 deliveriesRouter.get("/recent", async (req, res) => {
@@ -65,7 +137,13 @@ deliveriesRouter.post("/", async (req, res) => {
   // A receipt printed for another store must never be saved to this store's
   // records. Checked before anything is written, including the store upsert.
   if (input.receipt_store_code !== input.store_code) {
-    return res.json({ status: "store_mismatch", delivery: null, acceptedItems: [], rejectedItems: [] });
+    return res.json({
+      status: "store_mismatch",
+      delivery: null,
+      acceptedItems: [],
+      rejectedItems: [],
+      mergedItems: [],
+    });
   }
 
   // The frontend's store-session flow never registers a store ahead of time —
@@ -81,7 +159,13 @@ deliveriesRouter.post("/", async (req, res) => {
     return res.status(500).json({ error: "internal_error", message: storeUpsertError.message });
   }
 
-  const duplicateDelivery = { status: "duplicate_delivery", delivery: null, acceptedItems: [], rejectedItems: [] };
+  const duplicateDelivery = {
+    status: "duplicate_delivery",
+    delivery: null,
+    acceptedItems: [],
+    rejectedItems: [],
+    mergedItems: [],
+  };
 
   const { data: inserted, error: deliveryError } = await supabase
     .from("deliveries")
@@ -125,7 +209,9 @@ deliveriesRouter.post("/", async (req, res) => {
     appending = true;
   }
 
-  const rowsToInsert = input.items.map((item) => ({
+  const { items: mergedInputItems, merged: mergedItems } = mergeDuplicateItems(input.items);
+
+  const rowsToInsert = mergedInputItems.map((item) => ({
     delivery_code: input.delivery_code,
     store_code: input.store_code,
     item_code: item.item_code ?? null,
@@ -186,6 +272,7 @@ deliveriesRouter.post("/", async (req, res) => {
     delivery,
     acceptedItems,
     rejectedItems,
+    mergedItems,
   });
 });
 

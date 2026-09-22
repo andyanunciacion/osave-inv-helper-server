@@ -4,3 +4,4 @@ dist
 .env.local
 *.log
 sample-files/
+.env.backup
