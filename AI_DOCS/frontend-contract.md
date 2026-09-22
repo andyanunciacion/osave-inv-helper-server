@@ -374,3 +374,54 @@ shape identical — should not require changing anything in
 hook's current behavior (e.g. grouping/filtering in §3) is really a query
 shape that belongs in SQL/an RPC rather than client-side `.filter()`, that's
 a hook-internals change, still without touching call sites.
+
+---
+
+## 8. Write path — correcting a delivered item's quantity
+
+**As built — no frontend hook yet** (this endpoint has no corresponding
+`features/deliveries/hooks/*` call site as of 2026-09-22; add one here once
+the frontend grows an edit UI). Added per `main-file.md` §12's "edit log"
+suggestion — deliberately scoped to **quantity only**, not a general item
+PATCH: `item_code`, `item_name`, `unit`, `item_price`, `total_item_price`,
+etc. stay immutable through this route.
+
+**`PATCH /api/deliveries/:delivery_code/items/:item_id`**
+
+```ts
+interface UpdateItemQuantityInput {
+  quantity: number;        // >= 0, required
+  reason?: string | null;  // optional free-text note, e.g. "recount"
+}
+
+interface DeliveryItemUpdate {
+  id: string;               // uuid
+  item_id: string;
+  delivery_code: string;
+  store_code: string;
+  previous_quantity: number | null;
+  new_quantity: number;
+  reason: string | null;
+  created_at: string;
+}
+
+interface UpdateItemQuantityResult {
+  item: DeliveryItem;              // the row after the update
+  update: DeliveryItemUpdate | null; // null when `quantity` matched the
+                                      // existing value — a no-op isn't audited
+}
+```
+
+- 200 with the shape above on success, whether or not anything actually
+  changed (idempotent resubmission just comes back with `update: null`).
+- 404 `{ error: "not_found", message }` if `item_id` doesn't exist under
+  `delivery_code`.
+- 400 `{ error: "invalid_body", issues }` on a missing/negative `quantity`.
+- No auth/actor tracking on the history row yet (matches `uploaded_by` above
+  — deferred with the rest of auth, `main-file.md` §12/§3).
+
+**`GET /api/deliveries/:delivery_code/items/:item_id/history`**
+
+Returns `{ history: DeliveryItemUpdate[] }`, most recent first — every
+quantity correction ever made to that item, unfiltered/unpaginated (this
+list is expected to stay small at this project's scale).

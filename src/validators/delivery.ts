@@ -26,6 +26,13 @@ export const createDeliverySchema = z.object({
 export type CreateDeliveryInput = z.infer<typeof createDeliverySchema>;
 export type DeliveryItemInput = z.infer<typeof deliveryItemSchema>;
 
+export const updateDeliveryItemQuantitySchema = z.object({
+  quantity: z.number().nonnegative(),
+  reason: z.string().trim().min(1).nullish(),
+});
+
+export type UpdateDeliveryItemQuantityInput = z.infer<typeof updateDeliveryItemQuantitySchema>;
+
 export const searchQuerySchema = z
   .object({
     store_code: z.string().trim().min(1).transform(normalizeStoreCode),

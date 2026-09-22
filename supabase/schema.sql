@@ -53,6 +53,23 @@ create index if not exists delivery_items_store_item_name_idx on delivery_items 
 create index if not exists delivery_items_store_created_at_idx on delivery_items (store_code, created_at);
 create index if not exists deliveries_store_date_idx on deliveries (store_code, delivery_date);
 
+-- One row per quantity correction made to a confirmed delivery_items row
+-- (main-file.md §12's "edit log" suggestion). Item edits are intentionally
+-- narrow (quantity only, see CLAUDE.md) so this table only ever tracks a
+-- before/after quantity pair, not a generic field-diff.
+create table if not exists delivery_item_updates (
+  id uuid primary key default gen_random_uuid(),
+  item_id uuid not null references delivery_items(id),
+  delivery_code text not null references deliveries(delivery_code),
+  store_code text not null references stores(store_code),  -- denormalized, matches delivery_items
+  previous_quantity numeric,
+  new_quantity numeric not null,
+  reason text,
+  created_at timestamptz default now()
+);
+
+create index if not exists delivery_item_updates_item_idx on delivery_item_updates (item_id, created_at);
+
 -- This backend only ever talks to Supabase with the service_role key
 -- (src/lib/supabase.ts), which bypasses RLS regardless of these settings.
 -- Enabling RLS with no policies just locks the anon/publishable and
@@ -61,3 +78,4 @@ create index if not exists deliveries_store_date_idx on deliveries (store_code, 
 alter table stores enable row level security;
 alter table deliveries enable row level security;
 alter table delivery_items enable row level security;
+alter table delivery_item_updates enable row level security;

@@ -1,12 +1,15 @@
 import { Router } from "express";
 import { supabase } from "../lib/supabase.js";
-import { createDeliverySchema, recentQuerySchema } from "../validators/delivery.js";
+import { createDeliverySchema, recentQuerySchema, updateDeliveryItemQuantitySchema } from "../validators/delivery.js";
 import type { DeliveryItemInput } from "../validators/delivery.js";
 
 export const deliveriesRouter = Router();
 
 const DELIVERY_ITEM_COLUMNS =
   "id, delivery_code, store_code, item_code, item_name, unit_count, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
+
+const DELIVERY_ITEM_UPDATE_COLUMNS =
+  "id, item_id, delivery_code, store_code, previous_quantity, new_quantity, reason, created_at";
 
 interface MergedItemInfo {
   item_code: string | null;
@@ -274,6 +277,89 @@ deliveriesRouter.post("/", async (req, res) => {
     rejectedItems,
     mergedItems,
   });
+});
+
+// Quantity-only correction for an already-confirmed item, with an audit
+// record of the change (main-file.md §12's "edit log" suggestion — see
+// CLAUDE.md for why this is scoped to quantity rather than a general PATCH).
+deliveriesRouter.patch("/:delivery_code/items/:item_id", async (req, res) => {
+  const parsed = updateDeliveryItemQuantitySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_body", issues: parsed.error.issues });
+  }
+  const { delivery_code, item_id } = req.params;
+  const { quantity, reason } = parsed.data;
+
+  const { data: existing, error: fetchError } = await supabase
+    .from("delivery_items")
+    .select(DELIVERY_ITEM_COLUMNS)
+    .eq("id", item_id)
+    .eq("delivery_code", delivery_code)
+    .maybeSingle();
+
+  if (fetchError) {
+    return res.status(500).json({ error: "internal_error", message: fetchError.message });
+  }
+  if (!existing) {
+    return res.status(404).json({ error: "not_found", message: "delivery item not found" });
+  }
+
+  const previousQuantity = existing.quantity;
+
+  const { data: updated, error: updateError } = await supabase
+    .from("delivery_items")
+    .update({ quantity })
+    .eq("id", item_id)
+    .select(DELIVERY_ITEM_COLUMNS)
+    .single();
+
+  if (updateError) {
+    return res.status(500).json({ error: "internal_error", message: updateError.message });
+  }
+
+  // No-op corrections (resubmitting the same value) don't get a history row —
+  // there's nothing that actually changed to audit.
+  let update: unknown = null;
+  if (previousQuantity !== quantity) {
+    const { data: historyRow, error: historyError } = await supabase
+      .from("delivery_item_updates")
+      .insert({
+        item_id,
+        delivery_code,
+        store_code: existing.store_code,
+        previous_quantity: previousQuantity,
+        new_quantity: quantity,
+        reason: reason ?? null,
+      })
+      .select(DELIVERY_ITEM_UPDATE_COLUMNS)
+      .single();
+
+    if (historyError) {
+      return res.status(500).json({ error: "internal_error", message: historyError.message });
+    }
+    update = historyRow;
+  }
+
+  res.json({ item: updated, update });
+});
+
+// The audit trail for the route above — every quantity correction made to
+// this item, most recent first.
+deliveriesRouter.get("/:delivery_code/items/:item_id/history", async (req, res) => {
+  const { delivery_code, item_id } = req.params;
+
+  const { data: history, error } = await supabase
+    .from("delivery_item_updates")
+    .select(DELIVERY_ITEM_UPDATE_COLUMNS)
+    .eq("delivery_code", delivery_code)
+    .eq("item_id", item_id)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    return res.status(500).json({ error: "internal_error", message: error.message });
+  }
+
+  res.json({ history: history ?? [] });
 });
 
 deliveriesRouter.get("/:delivery_code", async (req, res) => {
