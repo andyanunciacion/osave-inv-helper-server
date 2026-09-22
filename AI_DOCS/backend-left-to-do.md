@@ -36,10 +36,6 @@ its printed "Total Value". Still open:
   `confirm()` drops blank-name rows, so the review screen has to surface
   these). A row with a description but no SAN, price or total is dropped as
   indistinguishable from page-footer noise.
-- **The receipt itself can repeat an item code** (sample page 12 prints
-  `4272` twice). Delivery creation will reject the second as
-  `duplicate_item_code`, so that delivery's saved total will be lower than
-  the printed one. Decide whether that's intended.
 - **Run `supabase/migrations/20260921000000_add_unit_count.sql`** in the
   Supabase SQL editor before deploying this branch — every read/write of
   `delivery_items` now selects `unit_count` and will 500 until the column
