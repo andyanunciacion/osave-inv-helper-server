@@ -57,13 +57,16 @@ its printed "Total Value". Still open:
   If the host ends up behind a proxy, set Express's `trust proxy` so the
   per-IP limit sees real client IPs.
 
-## 2. Editing / deleting a confirmed delivery or item
+## 2. Deleting a confirmed delivery or item
 
-Flagged as an open question in `main-file.md` §12, never resolved. **Marked
-optional / nice-to-have, not blocking** — no PATCH or delete routes exist
-for `deliveries` or `delivery_items`. If this gets picked up: prefer
-soft-delete + an edit log over hard deletes, per the original doc's own
-suggestion, for auditability.
+Flagged as an open question in `main-file.md` §12, still unresolved for the
+delete half. **Marked optional / nice-to-have, not blocking** — no delete
+routes exist for `deliveries` or `delivery_items`. Quantity edits are now
+handled (`PATCH /api/deliveries/:delivery_code/items/:item_id`, audited via
+`delivery_item_updates` — see `frontend-contract.md` §8). If delete gets
+picked up: prefer soft-delete + an edit log over hard deletes, per the
+original doc's own suggestion, for auditability — same pattern as the
+quantity-edit history table.
 
 ## 3. Auth / access control
 
