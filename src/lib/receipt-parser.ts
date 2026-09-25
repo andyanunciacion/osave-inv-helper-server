@@ -19,6 +19,7 @@ export interface ParsedHeader {
   warehouse_code: string;
   delivery_date: string;
   receipt_store_code: string;
+  printout_datetime: string;
 }
 
 export interface ParsedItem {
@@ -209,14 +210,90 @@ function normalizeDate(raw: string): string {
 
 const looksLikeDate = (text: string): boolean => /\d{4}/.test(text) && /\d/.test(text) && normalizeDate(text) !== text.trim();
 
-function parseHeader(pool: Word[]): ParsedHeader {
+// "August 17, 2026, 11:15:30 AM" -> "2026-08-17T11:15:30". Printed twice per
+// page (next to the label, and again in the page footer) on every sample
+// receipt seen so far, and identical to the second across every page of the
+// same physical printout — which is exactly what makes it a reliable join
+// key for filling in a sibling page's store code (see ocr.ts's /reconcile).
+function normalizePrintoutDatetime(raw: string): string {
+  const trimmed = raw.trim().replace(/\s+/g, " ");
+  const match = trimmed.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4}),?\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return trimmed;
+
+  const [, monthName, day, year, hourRaw, minute, second, meridiem] = match;
+  const month = MONTHS.indexOf(monthName.slice(0, 3).toLowerCase());
+  if (month === -1) return trimmed;
+
+  let hour = Number.parseInt(hourRaw, 10) % 12;
+  if (meridiem.toUpperCase() === "PM") hour += 12;
+
+  return `${year}-${String(month + 1).padStart(2, "0")}-${day.padStart(2, "0")}T${String(hour).padStart(2, "0")}:${minute}:${second}`;
+}
+
+interface Footer {
+  printoutDatetime: string;
+  warehouseCode: string;
+}
+
+// The page footer — "September 14, 2026, 11:45:27 PM , BUN DC , Page 4 of 6" —
+// repeats the printout timestamp and the warehouse on every page. Unlike the
+// header copy it sits clear of the tilt and of whatever overlaps the top of the
+// photo (a neighbouring sheet covered the end of the header timestamp on one
+// sample, which cost that page its store-code reconciliation), so it is read
+// first and the header is only a fallback. Matched as a token run over every
+// word rather than by geometry: a complete month/day/year/time/meridiem
+// sequence is a strong enough signature on its own.
+function parseFooter(words: Word[]): Footer | null {
+  // Vision emits separators like "," as words of their own, so they are
+  // dropped up front — "September 14 , 2026 , 11:45:27 PM" and the glued
+  // "September 14, 2026, 11:45:27 PM" then both reduce to the same tokens.
+  const tokens = words.map((w) => w.text).filter((t) => /[A-Za-z0-9]/.test(t));
+  let datetimeOnly: Footer | null = null;
+
+  for (let i = 0; i + 5 <= tokens.length; i++) {
+    const [month, day, year, time, meridiem] = tokens.slice(i, i + 5).map((t) => t.replace(/,+$/, ""));
+    if (
+      !/^[A-Za-z]{3,9}\.?$/.test(month) ||
+      MONTHS.indexOf(month.slice(0, 3).toLowerCase()) === -1 ||
+      !/^\d{1,2}$/.test(day) ||
+      !/^\d{4}$/.test(year) ||
+      !/^\d{1,2}:\d{2}:\d{2}$/.test(time) ||
+      !/^(AM|PM)$/i.test(meridiem)
+    ) {
+      continue;
+    }
+
+    const printoutDatetime = normalizePrintoutDatetime(`${month} ${day}, ${year}, ${time} ${meridiem}`);
+
+    // ", BUN DC , Page 4 of 6" — the warehouse is everything up to "Page",
+    // and only trusted when that marker is there to confirm this is the footer.
+    let j = i + 5;
+    const warehouse: string[] = [];
+    while (j < tokens.length && warehouse.length < 4 && norm(tokens[j]) !== "page") {
+      warehouse.push(tokens[j]);
+      j++;
+    }
+    if (warehouse.length > 0 && j < tokens.length && norm(tokens[j]) === "page") {
+      return { printoutDatetime, warehouseCode: warehouse.join(" ") };
+    }
+    datetimeOnly ??= { printoutDatetime, warehouseCode: "" };
+  }
+
+  return datetimeOnly;
+}
+
+function parseHeader(pool: Word[], footer: Footer | null): ParsedHeader {
   const codeLabel = findSequence(pool, ["inv", "tran", "no"]);
   const fromLabel = findSequence(pool, ["from"]);
   const dateLabel = findSequence(pool, ["transaction", "date"]);
+  const printoutLabel = findSequence(pool, ["date", "and", "hour", "of", "printout"]);
   const toWord = pool.find((w) => norm(w.text) === "to");
 
   const deliveryCode = codeLabel ? joinWords(valueRightOf(codeLabel, pool)).replace(/\s+/g, "") : "";
-  const warehouseCode = fromLabel ? joinWords(valueRightOf(fromLabel, pool)) : "";
+  const labelWarehouse = fromLabel ? joinWords(valueRightOf(fromLabel, pool)) : "";
+  const warehouseCode = footer?.warehouseCode || labelWarehouse;
+  const printoutRaw = printoutLabel ? joinWords(valueRightOf(printoutLabel, pool)) : "";
+  const printoutDatetime = footer?.printoutDatetime || (printoutRaw ? normalizePrintoutDatetime(printoutRaw) : "");
 
   let deliveryDate = "";
   if (dateLabel) {
@@ -238,6 +315,7 @@ function parseHeader(pool: Word[]): ParsedHeader {
     warehouse_code: warehouseCode,
     delivery_date: deliveryDate,
     receipt_store_code: receiptStoreCode,
+    printout_datetime: printoutDatetime,
   };
 }
 
@@ -637,7 +715,7 @@ export function parseReceipt(pages: VisionPage[]): ParsedReceipt {
   const { items, headerPool } = parseItems(words, words, medH);
 
   return {
-    header: parseHeader(headerPool),
+    header: parseHeader(headerPool, parseFooter(words)),
     items,
   };
 }

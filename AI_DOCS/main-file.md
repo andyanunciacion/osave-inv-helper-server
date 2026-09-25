@@ -20,7 +20,7 @@ This document covers architecture, data model, business rules, and a phased buil
 | From: [warehouse_code] | `warehouse_code` | |
 | Transaction Date | `delivery_date` | |
 | Inv. Tran. No. | `delivery_code` | primary identifier — see §4 |
-| Date/hour of printout | — | disregard |
+| Date/hour of printout | `printout_datetime` | see §5 rule 8 — used to recover a blocked store code, not persisted on `deliveries` |
 | No. of Pallets | — | disregard |
 
 | Item table column | Maps to | Notes |
@@ -144,6 +144,7 @@ I'd default to option 1 for MVP — it's a small addition and keeps the rule air
 5. Duplicate rejection happens at the database level (the `unique` constraint, and the `deliveries` primary key) *and* is surfaced clearly in the UI at review time, so staff know exactly which line — or which whole receipt — failed and why.
 6. The receipt's printed "To" store code (`receipt_store_code` — the first number in the "To:" line; the address after it is ignored) must match the session's `store_code`. A mismatch is **rejected**, so a receipt for one store can't land in another store's records: `/api/ocr` returns 409 `store_mismatch` before any items are returned, and `POST /api/deliveries` returns `status: "store_mismatch"` and writes nothing. (This replaces the earlier warn-only rule.) `receipt_store_code` is **required** on `POST /api/deliveries` (400 if missing or blank), including for manual entry — staff type it from the paper receipt. If OCR couldn't read the "To" code, `/api/ocr` returns it blank instead of rejecting, and the user must fill it in before the delivery can be saved.
 7. A physical receipt can span several photographed pages ("Page 10 of 12"), and every page prints the same "Inv. Tran. No.". A later page for the **same store** appends its items to the existing delivery (rule 3 still rejects individual duplicate items); a page whose items are all duplicates, or the same code under a **different store**, comes back as `duplicate_delivery`.
+8. When a photo's "To:" store code can't be read — the digits themselves obscured (a folded corner, a staple, a sticker), or even the "To:" label itself obscured so there's nothing to anchor the search from — it isn't necessarily hand-typed by the user. Every page of one physical receipt also prints an identical "Date and hour of printout" (down to the second, and printed a second time in the page footer as extra redundancy), so a multi-photo upload can recover it from a sibling page instead: if exactly one other page in the same upload shares that exact timestamp *and* has a store code that read cleanly, that code is copied over and flagged as inferred rather than OCR'd (`POST /api/ocr/reconcile`, §7). No match, or siblings that disagree, leaves it blank — same as today, the user fills it in by hand. This is a same-upload cross-check only: it never looks at previously-saved deliveries, and rule 6's mismatch check still applies to an inferred code exactly as it would to a directly-read one.
 
 ---
 
@@ -156,6 +157,7 @@ Enter or scan store code → store it in `localStorage` → every screen after t
 1. Take/upload one or more photos of the delivery receipt.
 2. Assign a temporary **local draft ID** client-side (just for tracking this upload in the local queue) — this is *not* the delivery code. Unlike the earlier version of this plan, the real `delivery_code` isn't known yet, since it lives on the receipt itself.
 3. Queue the photo(s) for OCR; user is free to keep using the app.
+3a. Once every photo in this upload has come back from OCR, if more than one page was uploaded, send their headers to `/api/ocr/reconcile` (§5 rule 8) so a page with a blocked store code can pick one up from a sibling page before the review screen renders — a single-photo upload skips this step, there's nothing to cross-check against.
 4. When OCR returns, show a **review/edit screen** with:
    - The extracted header fields — store, warehouse, transaction date, and the **Inv. Tran. No. shown prominently and editable**, since it's now the primary key and a misread here matters more than a misread item name.
    - (A receipt for a different store never gets this far — `/api/ocr` rejects it, rule 6, §5.)
@@ -185,6 +187,7 @@ The image does **not** need to be stored anywhere, in Supabase or otherwise. But
 2. It's sent directly to a small serverless **OCR proxy endpoint** (a Next.js API route or Supabase Edge Function) which calls the chosen extraction service and returns structured fields. This proxy exists purely for security: calling any of these APIs straight from the browser would expose your API key in every request; a thin server-side function keeps the key hidden without persisting the image anywhere.
 3. Header fields and item rows come back as structured JSON, mapped to the schema in §4.
 4. Only that JSON is sent to the client. The image is discarded after this step — never written to disk or storage.
+4a. For a multi-photo upload, once all pages have come back, their headers are sent to `/api/ocr/reconcile` — a second, image-free endpoint that fills in a page's blocked store code from a sibling page sharing the same printed "Date and hour of printout" (§5 rule 8). This is a pure cross-check over already-extracted JSON, not another Vision call.
 5. User reviews/edits on the review screen (§6); on confirm, only text/number data is written to Postgres.
 
 **Trade-off to weigh either way:** without keeping the image, you lose the ability to go back and check the original receipt if a number looks wrong or a supplier disputes a delivery later. If that matters, a middle ground is to only retain images the OCR step flags as low-confidence, rather than storing everything — this can be added later without any redesign, since it's purely additive.
