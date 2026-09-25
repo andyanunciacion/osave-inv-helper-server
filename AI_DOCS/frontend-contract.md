@@ -298,6 +298,10 @@ deliberately mocked or postponed:
     warehouse_code: string;
     delivery_date: string;      // "yyyy-MM-dd"
     receipt_store_code: string;
+    printout_datetime: string;  // "yyyy-MM-ddTHH:mm:ss", the printed "Date
+                                 // and hour of printout" — not shown on the
+                                 // review screen; kept only to send back to
+                                 // /api/ocr/reconcile for a multi-photo upload
   }
 
   interface DraftItem {
@@ -346,6 +350,39 @@ deliberately mocked or postponed:
     or `"PIECE"`, or `""` if the UOM cell wasn't read.
   - One call handles one photographed page; a multi-page receipt is several
     calls whose items are then submitted with the same `delivery_code` (§2).
+
+  **As built — `POST /api/ocr/reconcile`** (`application/json`, no image —
+  runs after every page in a multi-photo upload has already come back from
+  `/api/ocr`):
+  - Body: `{ store_code: string, pages: DraftHeader[] }` — `pages` is exactly
+    what `/api/ocr` returned for each page's `header` (all five `DraftHeader`
+    fields, `localId`/items not included). Order doesn't matter and isn't
+    preserved specially; the response mirrors the input array 1:1 by index.
+  - 200 → `{ pages: Array<DraftHeader & { receipt_store_code_inferred:
+    boolean; store_mismatch: boolean }> }`. For a page whose
+    `receipt_store_code` was already non-blank, that value passes through
+    unchanged (`receipt_store_code_inferred: false`). For a page where it was
+    `""`: if exactly one other page in the batch shares the same
+    `printout_datetime` *and* has a non-blank `receipt_store_code`, that code
+    is copied in and `receipt_store_code_inferred` is `true`; otherwise it
+    stays `""` and `receipt_store_code_inferred` is `false` — same as not
+    calling this endpoint at all, so it's always safe to call unconditionally
+    on a multi-page upload rather than checking first for blanks.
+  - `store_mismatch` is `true` when that page's (possibly just-inferred)
+    `receipt_store_code` is non-blank and doesn't equal `store_code` — the
+    same check `/api/ocr` does inline, surfaced per-page here instead of a
+    409 since one bad page in a batch shouldn't block review of the others.
+    This is a UI hint only: `POST /api/deliveries` still re-checks
+    `receipt_store_code` against `store_code` itself before writing anything
+    (rule 6, §5), so skipping this endpoint or ignoring the flag can't get a
+    mismatched receipt saved.
+  - 400 `invalid_body`. Never a 409 — there's no single "this page" to reject,
+    just per-page flags for the review screen to act on.
+  - Call this once per upload after all pages' `/api/ocr` calls have
+    resolved, not once per page — it needs every sibling present to find a
+    match. A single-photo upload has no siblings to check against, so
+    skipping the call there is equivalent to calling it (nothing would be
+    inferred).
 
 - **Auth / `uploaded_by`**: currently hardcoded to `"prototype-session"`.
   No real user/session identity exists yet on the frontend.
