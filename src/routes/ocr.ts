@@ -2,7 +2,8 @@ import { Router } from "express";
 import { rateLimit } from "express-rate-limit";
 import multer from "multer";
 import { normalizeStoreCode } from "../lib/normalize.js";
-import { parseReceipt } from "../lib/receipt-parser.js";
+import { applyItemHistory, parseReceipt, type ItemHistory, type ParsedReceipt } from "../lib/receipt-parser.js";
+import { supabase } from "../lib/supabase.js";
 import { detectReceiptPages } from "../lib/vision.js";
 import { ocrBodySchema, ocrReconcileBodySchema } from "../validators/ocr.js";
 
@@ -16,6 +17,38 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
 });
+
+// Staff strike through the UOM cell while checking a delivery, and the
+// watermark can hide Unit/Box, so for rows missing either, this store's most
+// recent delivery of the same item fills them in (still marked inferred). A
+// failed lookup only means less gets filled in — the OCR result still goes
+// back.
+async function withItemHistory(receipt: ParsedReceipt, storeCode: string): Promise<ParsedReceipt> {
+  const codes = [
+    ...new Set(
+      receipt.items
+        .filter((i) => i.item_code && (!i.unit_count || !i.unit || i.inferred.includes("unit")))
+        .map((i) => i.item_code),
+    ),
+  ];
+  if (codes.length === 0) return receipt;
+
+  const { data, error } = await supabase
+    .from("delivery_items")
+    .select("item_code, unit, unit_count")
+    .eq("store_code", storeCode)
+    .in("item_code", codes)
+    .order("created_at", { ascending: false });
+  if (error || !data) return receipt;
+
+  const history = new Map<string, ItemHistory>();
+  for (const row of data) {
+    if (row.item_code && !history.has(row.item_code)) {
+      history.set(row.item_code, { unit: row.unit, unit_count: row.unit_count === null ? null : Number(row.unit_count) });
+    }
+  }
+  return applyItemHistory(receipt, history);
+}
 
 function intFromEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
@@ -66,7 +99,8 @@ ocrRouter.post("/", perIpLimiter, dailyCapLimiter, upload.single("image"), async
     return res.status(502).json({ error: "ocr_failed", message });
   }
 
-  const { header, items } = parseReceipt(pages);
+  const parsed = parseReceipt(pages);
+  const { header } = parsed;
 
   // A receipt printed for another store must never reach this store's
   // records. An unreadable "To:" is not treated as a mismatch here — it comes
@@ -82,7 +116,8 @@ ocrRouter.post("/", perIpLimiter, dailyCapLimiter, upload.single("image"), async
     });
   }
 
-  res.json({ header, items });
+  const { items, totals } = await withItemHistory(parsed, store_code);
+  res.json({ header, items, totals });
 });
 
 // No Vision call here — it only cross-references header fields the client
