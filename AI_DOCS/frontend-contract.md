@@ -350,6 +350,26 @@ deliberately mocked or postponed:
     or `"PIECE"`, or `""` if the UOM cell wasn't read.
   - One call handles one photographed page; a multi-page receipt is several
     calls whose items are then submitted with the same `delivery_code` (§2).
+  - **Struck-through / inferred cells.** Staff tick or strike through Qty and
+    UOM while checking a delivery, so the server fills unreadable cells from
+    the row's printed arithmetic (`Total = Qty × Unit/Box × Sales Price`),
+    from `PIECE` ⇒ Unit/Box 1 / Unit/Box 1 ⇒ `PIECE`, and from this store's
+    most recent delivery of the same `item_code`. Each item carries:
+    - `inferred: ("unit_count" | "unit" | "quantity" | "item_price" |
+      "total_item_price")[]` — cells that were worked out, not read. Show them
+      as "calculated"; they're never presented as OCR'd.
+    - `has_annotation: boolean` — handwriting on the row: a note after the
+      description (already stripped from `item_name`), or a handwritten Qty
+      that disagreed with the arithmetic. `quantity` is always the *printed*
+      quantity; staff correct it on review if what arrived differs.
+  - **`totals`** — the page's printed totals block, `{ total_pcs, total_box,
+    total_items, total_value }`, all strings, `""` when not read (no totals
+    block on a middle page; `total_pcs` absent when the page has no PIECE
+    rows; or the numbers' labels were unreadable). Compare against the
+    (edited) rows: `total_box`/`total_pcs` = Σ quantity of BOX/PIECE rows,
+    `total_items` = number of *distinct* item codes, `total_value` = Σ
+    total_item_price. A mismatch means a missed row or a misread cell — soft
+    warning only, like the per-row price mismatch.
 
   **As built — `POST /api/ocr/reconcile`** (`application/json`, no image —
   runs after every page in a multi-photo upload has already come back from

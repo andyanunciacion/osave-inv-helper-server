@@ -22,6 +22,8 @@ export interface ParsedHeader {
   printout_datetime: string;
 }
 
+export type InferredField = "unit_count" | "unit" | "quantity" | "item_price" | "total_item_price";
+
 export interface ParsedItem {
   item_code: string;
   item_name: string;
@@ -30,11 +32,36 @@ export interface ParsedItem {
   quantity: string;
   item_price: string;
   total_item_price: string;
+  // Fields worked out rather than read off the photo — from the printed
+  // relationship Total = Qty × Unit/Box × Price, or from this store's earlier
+  // deliveries of the same item — usually because staff struck through the
+  // cell while checking the delivery. The review screen marks them so they
+  // still get a glance.
+  inferred: InferredField[];
+  // Something handwritten sits on this row: a note after the description
+  // (stripped from item_name), or a Qty that disagrees with the printed
+  // arithmetic. Quantity stays the *printed* value; staff correct it on the
+  // review screen if what arrived differs.
+  has_annotation: boolean;
+}
+
+// The page's printed totals block ("Total Pcs: / Total Box: / Total Item/s: /
+// Total Value:"), as plain strings like every other OCR'd field. "" means not
+// read — the white-on-grey labels are usually dropped by Vision, so a number
+// is only reported when its meaning is unambiguous. The review screen
+// compares these live against the (edited) rows to catch a missed row or a
+// misread quantity.
+export interface ParsedTotals {
+  total_pcs: string;
+  total_box: string;
+  total_items: string;
+  total_value: string;
 }
 
 export interface ParsedReceipt {
   header: ParsedHeader;
   items: ParsedItem[];
+  totals: ParsedTotals;
 }
 
 interface Word {
@@ -47,6 +74,7 @@ interface Word {
   h: number;
   angle: number;
   spaceAfter: boolean;
+  confidence: number;
 }
 
 // Vision's detectedBreak types (SPACE, SURE_SPACE, EOL_SURE_SPACE, LINE_BREAK),
@@ -84,6 +112,7 @@ function extractWords(pages: VisionPage[]): Word[] {
             w: Math.hypot(b.x - a.x, b.y - a.y),
             h: Math.hypot(d.x - a.x, d.y - a.y),
             angle: Math.atan2(b.y - a.y, b.x - a.x),
+            confidence: word.confidence ?? 1,
           });
         }
       }
@@ -376,11 +405,59 @@ const NUMERIC_SLOTS: { field: "unit_count" | "unit" | "quantity" | "item_price" 
 ];
 
 const MONEY_RE = /^\$?\d{1,3}(?:,\d{3})*\.\d{2}$|^\$?\d+\.\d{2}$/;
+const INT_RE = /^\d{1,4}$|^\d{1,3}(?:,\d{3})+$/;
 
-function tokenType(text: string): TokenType | null {
-  if (MONEY_RE.test(text)) return "money";
-  if (/^\d{1,4}$/.test(text)) return "int";
-  if (/^(box|piece|pcs|pc)$/i.test(text)) return "uom";
+// Staff tick or strike through the UOM and Qty cells while checking a
+// delivery, and the pen stroke comes back glued to the cell's text ("-BOX",
+// "_BOX", "10-", "-65.75").
+const STROKE_EDGES = /^[-_~+=*'"`|.,:;–—]+|[-_~+=*'"`|,:;–—]+$/g;
+
+// A stroke through a price's first digit makes Vision read it as a letter:
+// "T19.00" is 119.00, "To.00" is 10.00. Only applied to a token that already
+// ends like money.
+const DIGIT_LOOKALIKES: Record<string, string> = { O: "0", o: "0", D: "0", T: "1", t: "1", I: "1", l: "1", "|": "1" };
+
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const next = Math.min(row[j] + 1, row[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = row[j];
+      row[j] = next;
+    }
+  }
+  return row[b.length];
+}
+
+// "DOX", "B0X", "PIEGE" — a struck-through UOM is still recognisably one of
+// the two units this template prints.
+function readUom(text: string): "BOX" | "PIECE" | null {
+  const t = text.toUpperCase();
+  if (/^(PIECE|PCS|PC)$/.test(t)) return "PIECE";
+  if (t === "BOX") return "BOX";
+  if (t.length === 3 && editDistance(t, "BOX") === 1 && /OX$|^BO/.test(t)) return "BOX";
+  if (t.length >= 4 && editDistance(t, "PIECE") <= 1) return "PIECE";
+  return null;
+}
+
+interface Token {
+  type: TokenType;
+  value: string;
+}
+
+function readToken(raw: string): Token | null {
+  const text = raw.replace(STROKE_EDGES, "");
+  if (!text) return null;
+  if (MONEY_RE.test(text)) return { type: "money", value: cleanNumber(text) };
+  if (INT_RE.test(text)) return { type: "int", value: cleanNumber(text) };
+  const uom = readUom(text);
+  if (uom) return { type: "uom", value: uom };
+  if (/\d/.test(text) && /\.\d{2}$/.test(text)) {
+    const fixed = text.replace(/[A-Za-z|]/g, (c) => DIGIT_LOOKALIKES[c] ?? c);
+    if (MONEY_RE.test(fixed)) return { type: "money", value: cleanNumber(fixed) };
+  }
   return null;
 }
 
@@ -602,9 +679,207 @@ function groupIntoRows(tokens: Word[], medH: number, numericStart: number, curve
   return rows;
 }
 
-function parseItems(words: Word[], pool: Word[], medH: number): { items: ParsedItem[]; headerPool: Word[] } {
-  const san = findLabel(words, "san");
+// The SAN header label. A neighbouring sheet caught at the edge of the photo
+// can show its own SAN column (with its own "SAN" label), so the label
+// nearest "Description" on its left wins over simply the topmost one.
+function findSanLabel(words: Word[], desc: Word | undefined): Word | undefined {
+  if (!desc) return findLabel(words, "san");
+  const dist = (w: Word): number => Math.hypot(w.cx - desc.cx, w.cy - desc.cy);
+  return words.filter((w) => norm(w.text) === "san" && w.cx < desc.cx).sort((a, b) => dist(a) - dist(b))[0];
+}
+
+// Staff write notes after the printed description ("- missing 1 box",
+// "- confirmed ok"). Vision reads handwriting at low confidence (~0.3-0.6 vs
+// 0.8+ for print) and the notes start with a dash, so the description ends at
+// the first dash whose tail is mostly low-confidence words.
+function splitAnnotation(words: Word[]): { name: Word[]; annotated: boolean } {
+  for (let i = 1; i < words.length; i++) {
+    if (!/^[-~–—]/.test(words[i].text)) continue;
+    const tail = words.slice(i);
+    if (tail.reduce((s, w) => s + w.confidence, 0) / tail.length < 0.7) return { name: words.slice(0, i), annotated: true };
+  }
+  return { name: words, annotated: false };
+}
+
+const CELL_FIELDS = ["unit_count", "unit", "quantity", "item_price", "total_item_price"] as const;
+
+// On a strongly tilted photo a row's two halves can still come out unpaired:
+// the description with nothing (or only Unit/Box) to its right, next to an
+// item that has numbers but no description. Adjacent, and not both claiming
+// the same cell, they're one row.
+function mergeSplitRows(items: ParsedItem[]): ParsedItem[] {
+  const named = (i: ParsedItem): boolean => Boolean(i.item_code || i.item_name);
+  const out: ParsedItem[] = [];
+  for (const item of items) {
+    const prev = out[out.length - 1];
+    if (!prev || named(prev) === named(item)) {
+      out.push(item);
+      continue;
+    }
+    const [base, extra] = named(prev) ? [prev, item] : [item, prev];
+    if (base.total_item_price || CELL_FIELDS.some((f) => base[f] && extra[f])) {
+      out.push(item);
+      continue;
+    }
+    const cells = Object.fromEntries(CELL_FIELDS.filter((f) => extra[f]).map((f) => [f, extra[f]]));
+    out[out.length - 1] = { ...base, ...cells, has_annotation: base.has_annotation || extra.has_annotation };
+  }
+  return out;
+}
+
+const positive = (text: string): number | null => {
+  if (!text.trim()) return null;
+  const value = Number(text);
+  return Number.isFinite(value) && value > 0 ? value : null;
+};
+
+// Qty and Unit/Box are whole numbers; the tolerance only absorbs float noise
+// from the division, not a real mismatch.
+function whole(x: number): number | null {
+  const r = Math.round(x);
+  return r >= 1 && r <= 99999 && Math.abs(x - r) < 1e-6 * Math.max(1, x) ? r : null;
+}
+
+// Printed totals are exact to the cent on every sample receipt.
+const agrees = (u: number, q: number, p: number, t: number): boolean => Math.abs(u * q * p - t) < 0.006;
+
+// "2✓7.75" reads as "27.75": a tick running from the Qty cell into the price
+// glues the qty digit onto it. Dropping that digit is a second reading of the
+// price, and the dropped digit hints at the qty.
+function priceReadings(raw: string): { price: number; qtyHint: number | null }[] {
+  const price = positive(raw);
+  if (price === null) return [];
+  const glued = raw.match(/^(\d)(\d+\.\d{2})$/);
+  return glued
+    ? [{ price, qtyHint: null }, { price: Number(glued[2]), qtyHint: Number(glued[1]) }]
+    : [{ price, qtyHint: null }];
+}
+
+// Fills cells from the row's own printed arithmetic, Total = Qty × Unit/Box ×
+// Sales Price (main-file.md §4). Staff strike through Qty and UOM while
+// checking a delivery and Vision mostly can't read what's under the stroke,
+// but Unit/Box and Total are left clean — so Qty comes back as the one whole
+// number that makes the row add up. A filled cell is listed in `inferred`,
+// never passed off as read. A row that can't be made to add up is left as
+// read; the review screen flags the mismatch.
+export function reconcileItem(item: ParsedItem): ParsedItem {
+  const out: ParsedItem = { ...item, inferred: [...item.inferred] };
+  const set = (field: InferredField, value: string): void => {
+    out[field] = value;
+    if (!out.inferred.includes(field)) out.inferred.push(field);
+  };
+
+  // A PIECE row's Unit/Box is always 1, so a struck-through one is known.
+  if (!out.unit_count && out.unit === "PIECE") set("unit_count", "1");
+
+  const u = positive(out.unit_count);
+  const q = positive(out.quantity);
+  const t = positive(out.total_item_price);
+  const readings = priceReadings(out.item_price);
+
+  if (u !== null && t !== null && readings.length > 0) {
+    const solved = readings.flatMap((r) => {
+      const qty = whole(t / (u * r.price));
+      return qty === null ? [] : [{ ...r, qty }];
+    });
+    const pick =
+      solved.find((s) => s.qty === q) ??
+      solved.find((s) => s.qtyHint === null) ??
+      solved.find((s) => s.qtyHint === s.qty) ??
+      solved[0];
+    if (pick) {
+      if (pick.price !== readings[0].price) set("item_price", pick.price.toFixed(2));
+      if (pick.qty !== q) {
+        // A Qty was read but the printed arithmetic says otherwise — usually a
+        // handwritten count next to the struck-through printed one.
+        if (q !== null) out.has_annotation = true;
+        set("quantity", String(pick.qty));
+      }
+    }
+  } else if (u !== null && t !== null && q !== null) {
+    const price = Math.round((t / (u * q)) * 100) / 100;
+    if (agrees(u, q, price, t)) set("item_price", price.toFixed(2));
+  } else if (u === null && t !== null && q !== null && readings.length > 0) {
+    const unitCount = whole(t / (q * readings[0].price));
+    if (unitCount !== null) set("unit_count", String(unitCount));
+  } else if (t === null && u !== null && q !== null && readings.length > 0) {
+    set("total_item_price", (u * q * readings[0].price).toFixed(2));
+  }
+
+  // Unit/Box 1 is sold by the piece on every receipt seen so far, anything
+  // else by the box. (ocr.ts prefers this store's history for the item.)
+  const unitCount = positive(out.unit_count);
+  if (!out.unit && unitCount !== null) set("unit", unitCount === 1 ? "PIECE" : "BOX");
+  return out;
+}
+
+export interface ItemHistory {
+  unit: string | null;
+  unit_count: number | null;
+}
+
+// Fills a struck-through UOM, or a Unit/Box hidden under the watermark, from
+// how this store last received the same item, then re-runs the row
+// arithmetic now that more of the row is known.
+export function applyItemHistory(receipt: ParsedReceipt, history: Map<string, ItemHistory>): ParsedReceipt {
+  const items = receipt.items.map((item) => {
+    const known = history.get(item.item_code);
+    if (!known) return item;
+    const out: ParsedItem = { ...item, inferred: [...item.inferred] };
+    if (known.unit && (!out.unit || out.inferred.includes("unit"))) {
+      out.unit = known.unit;
+      if (!out.inferred.includes("unit")) out.inferred.push("unit");
+    }
+    if (known.unit_count && !out.unit_count) {
+      out.unit_count = String(known.unit_count);
+      out.inferred.push("unit_count");
+    }
+    return reconcileItem(out);
+  });
+  return { ...receipt, items };
+}
+
+const NO_TOTALS: ParsedTotals = { total_pcs: "", total_box: "", total_items: "", total_value: "" };
+
+// Reads the printed totals block. "Total Value:" is reliable (its label
+// survives and the amount sits right of it). The Pcs/Box/Item/s labels are
+// usually dropped, leaving a bare stack of numbers that is only read when its
+// meaning is unambiguous: three numbers are Pcs, Box, Item/s; two are Box,
+// Item/s only on a page without PIECE rows (the template omits Total Pcs
+// then). Vision sometimes reads one cell twice ("222" over "23"); the
+// lower-confidence duplicate is dropped.
+function parseTotals(region: Word[], columnX: number[], medH: number, hasPieceRows: boolean): ParsedTotals {
+  const totals = { ...NO_TOTALS };
+
+  const valueLabel = region.find((w) => norm(w.text) === "value");
+  if (valueLabel) {
+    const amount = region
+      .filter((w) => w.cx > valueLabel.x1 && Math.abs(w.cy - valueLabel.cy) < 1.2 * medH && readToken(w.text)?.type === "money")
+      .sort((a, b) => a.x0 - b.x0)[0];
+    if (amount) totals.total_value = cleanNumber(amount.text);
+  }
+
+  const left = columnX[1] - 0.6 * (columnX[2] - columnX[1]);
+  const right = columnX[3] + 0.3 * (columnX[4] - columnX[3]);
+  const stack = region
+    .filter((w) => w.cx >= left && w.cx <= right && readToken(w.text)?.type === "int")
+    .sort((a, b) => b.confidence - a.confidence)
+    .filter((w, i, all) => !all.slice(0, i).some((o) => Math.abs(o.cy - w.cy) < 0.5 * medH && Math.abs(o.cx - w.cx) < medH))
+    .sort((a, b) => a.cy - b.cy)
+    .map((w) => cleanNumber(w.text));
+
+  if (stack.length === 3) [totals.total_pcs, totals.total_box, totals.total_items] = stack;
+  else if (stack.length === 2 && !hasPieceRows) [totals.total_box, totals.total_items] = stack;
+  return totals;
+}
+
+function parseItems(
+  words: Word[],
+  pool: Word[],
+  medH: number,
+): { items: ParsedItem[]; totals: ParsedTotals; headerPool: Word[] } {
   const desc = findLabel(words, "description");
+  const san = findSanLabel(words, desc);
   const unit = findLabel(words, "unit");
   const uom = findLabel(words, "uom");
   const qty = findLabel(words, "qty");
@@ -614,7 +889,7 @@ function parseItems(words: Word[], pool: Word[], medH: number): { items: ParsedI
   const labels = [san, desc, unit, uom, qty, sales, total].filter((w): w is Word => Boolean(w));
   const curve = buildCurve(labels.map((w) => ({ x: w.cx, y: w.cy })));
   const numericX = fillColumnPositions([unit?.cx, uom?.cx, qty?.cx, sales?.cx, total?.cx]);
-  if (!curve || !numericX) return { items: [], headerPool: pool };
+  if (!curve || !numericX) return { items: [], totals: { ...NO_TOTALS }, headerPool: pool };
 
   const yr = (w: Word): number => w.cy - curve(w.cx);
   const tableTop = 2.2 * medH;
@@ -654,14 +929,16 @@ function parseItems(words: Word[], pool: Word[], medH: number): { items: ParsedI
 
   for (const row of itemRows) {
     const numericStart = columnX[1] - 0.5 * (columnX[2] - columnX[1]);
-    const left = row.words.filter((w) => w.cx < numericStart);
+    // Anything well left of the SAN column belongs to a neighbouring sheet
+    // caught at the edge of the photo, not to this row.
+    const left = row.words.filter((w) => w.cx < numericStart && w.cx >= columnX[0] - 2.5 * sanReach);
     const numeric = row.words
       .filter((w) => w.cx >= numericStart)
-      .map((w) => ({ w, type: tokenType(w.text) }))
-      .filter((t): t is { w: Word; type: TokenType } => t.type !== null);
+      .map((w) => ({ w, token: readToken(w.text) }))
+      .filter((t): t is { w: Word; token: Token } => t.token !== null);
 
     const slots = assignSlots(
-      numeric.map((t) => t.type),
+      numeric.map((t) => t.token.type),
       numeric.map((t) => t.w.cx),
       columnX.slice(1),
     );
@@ -674,6 +951,8 @@ function parseItems(words: Word[], pool: Word[], medH: number): { items: ParsedI
       quantity: "",
       item_price: "",
       total_item_price: "",
+      inferred: [],
+      has_annotation: false,
     };
 
     const deltas: number[] = [];
@@ -681,8 +960,7 @@ function parseItems(words: Word[], pool: Word[], medH: number): { items: ParsedI
     numeric.forEach((t, i) => {
       const slot = slots[i];
       if (slot < 0) return;
-      const { field } = NUMERIC_SLOTS[slot];
-      item[field] = field === "unit" ? (/^piece|pcs?$/i.test(t.w.text) ? "PIECE" : "BOX") : cleanNumber(t.w.text);
+      item[NUMERIC_SLOTS[slot].field] = t.token.value;
       deltas.push(t.w.cx - columnX[slot + 1]);
       columnX[slot + 1] = t.w.cx;
       seen.add(slot + 1);
@@ -696,7 +974,9 @@ function parseItems(words: Word[], pool: Word[], medH: number): { items: ParsedI
       seen.add(0);
       nameWords = left.slice(1);
     }
-    item.item_name = joinWords(nameWords);
+    const { name, annotated } = splitAnnotation(nameWords);
+    item.item_name = joinWords(name);
+    item.has_annotation = annotated;
 
     const shift = deltas.length ? deltas.reduce((s, d) => s + d, 0) / deltas.length : 0;
     columnX.forEach((_, k) => {
@@ -706,16 +986,23 @@ function parseItems(words: Word[], pool: Word[], medH: number): { items: ParsedI
     if (item.item_code || item.item_price || item.total_item_price) items.push(item);
   }
 
-  return { items, headerPool };
+  const reconciled = mergeSplitRows(items).map(reconcileItem);
+  const totalsRegion = Number.isFinite(footerYr)
+    ? words.filter((w) => yr(w) > footerYr - 0.6 * medH && yr(w) < footerYr + 4.5 * medH)
+    : [];
+  const totals = parseTotals(totalsRegion, columnX, medH, reconciled.some((i) => i.unit === "PIECE"));
+
+  return { items: reconciled, totals, headerPool };
 }
 
 export function parseReceipt(pages: VisionPage[]): ParsedReceipt {
   const words = extractWords(pages);
   const medH = median(words.map((w) => w.h));
-  const { items, headerPool } = parseItems(words, words, medH);
+  const { items, totals, headerPool } = parseItems(words, words, medH);
 
   return {
     header: parseHeader(headerPool, parseFooter(words)),
     items,
+    totals,
   };
 }
