@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { selectAll } from "../lib/select-all.js";
 import { supabase } from "../lib/supabase.js";
 import { searchQuerySchema } from "../validators/delivery.js";
 
@@ -44,8 +45,17 @@ function byItemCode(a: { item_code: string | null }, b: { item_code: string | nu
   return a.item_code.localeCompare(b.item_code, undefined, { numeric: true, sensitivity: "base" });
 }
 
-function escapeForIlike(value: string): string {
-  return `"%${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}%"`;
+// `q` is a literal substring, so LIKE's own wildcards in it (`%`, `_`, and
+// the `\` escape) are escaped. PostgREST also turns `*` into `%` and has no
+// escape for it, so a `*` in `q` still matches anything.
+function containsPattern(value: string): string {
+  return `%${value.replace(/[\\%_]/g, "\\$&")}%`;
+}
+
+// For a value inside PostgREST's .or() syntax, which needs double quotes
+// (and `\`/`"` escaped within them) once the value holds `,` `.` `(` `)`.
+function quoteForOr(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 searchRouter.get("/", async (req, res) => {
@@ -79,11 +89,16 @@ searchRouter.get("/", async (req, res) => {
       return res.json({ mode: "unified", items: [], pagination: { page, limit, total: 0 } });
     }
 
-    const { data: items, error: itemsError } = await supabase
-      .from("delivery_items")
-      .select(DELIVERY_ITEM_COLUMNS)
-      .eq("store_code", store_code)
-      .in("delivery_code", codes);
+    // Two full deliveries (~600 items each) already pass PostgREST's row cap.
+    const { data: items, error: itemsError } = await selectAll((from, to) =>
+      supabase
+        .from("delivery_items")
+        .select(DELIVERY_ITEM_COLUMNS)
+        .eq("store_code", store_code)
+        .in("delivery_code", codes)
+        .order("id")
+        .range(from, to),
+    );
 
     if (itemsError) {
       return res.status(500).json({ error: "internal_error", message: itemsError.message });
@@ -112,13 +127,20 @@ searchRouter.get("/", async (req, res) => {
   // delivery_code — fragment or exact — shows every item in that delivery;
   // only an exact match additionally auto-expands it. An item_code/item_name
   // match on a delivery whose code didn't match shows just the matched rows.
-  const escaped = escapeForIlike(q);
+  const pattern = containsPattern(q);
+  const quoted = quoteForOr(pattern);
 
-  const { data: matchedItems, error: matchedItemsError } = await supabase
-    .from("delivery_items")
-    .select(DELIVERY_ITEM_COLUMNS)
-    .eq("store_code", store_code)
-    .or(`item_code.ilike.${escaped},item_name.ilike.${escaped}`);
+  // Paged: a broad query ("a") matches most of the store's items, and the
+  // grouping below needs all of them.
+  const { data: matchedItems, error: matchedItemsError } = await selectAll((from, to) =>
+    supabase
+      .from("delivery_items")
+      .select(DELIVERY_ITEM_COLUMNS)
+      .eq("store_code", store_code)
+      .or(`item_code.ilike.${quoted},item_name.ilike.${quoted}`)
+      .order("id")
+      .range(from, to),
+  );
 
   if (matchedItemsError) {
     return res.status(500).json({ error: "internal_error", message: matchedItemsError.message });
@@ -128,7 +150,7 @@ searchRouter.get("/", async (req, res) => {
     .from("deliveries")
     .select("delivery_code")
     .eq("store_code", store_code)
-    .ilike("delivery_code", `%${q}%`);
+    .ilike("delivery_code", pattern);
   if (date) codeMatchQuery = codeMatchQuery.eq("delivery_date", date);
   if (dateFrom) codeMatchQuery = codeMatchQuery.gte("delivery_date", dateFrom);
   if (dateTo) codeMatchQuery = codeMatchQuery.lte("delivery_date", dateTo);
@@ -154,10 +176,14 @@ searchRouter.get("/", async (req, res) => {
 
   const fullItemsByDelivery = new Map<string, ItemRow[]>();
   if (codeMatchedCodes.size > 0) {
-    const { data: fullItems, error: fullItemsError } = await supabase
-      .from("delivery_items")
-      .select(DELIVERY_ITEM_COLUMNS)
-      .in("delivery_code", Array.from(codeMatchedCodes));
+    const { data: fullItems, error: fullItemsError } = await selectAll((from, to) =>
+      supabase
+        .from("delivery_items")
+        .select(DELIVERY_ITEM_COLUMNS)
+        .in("delivery_code", Array.from(codeMatchedCodes))
+        .order("id")
+        .range(from, to),
+    );
 
     if (fullItemsError) {
       return res.status(500).json({ error: "internal_error", message: fullItemsError.message });

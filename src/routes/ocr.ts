@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { RequestHandler } from "express";
 import { rateLimit } from "express-rate-limit";
 import multer from "multer";
 import { normalizeStoreCode } from "../lib/normalize.js";
@@ -56,9 +57,13 @@ function intFromEnv(name: string, fallback: number): number {
 }
 
 // Every accepted request is one billed Vision call. The per-IP limit stops a
-// buggy client retry loop; the global daily cap bounds total spend no matter
-// how many IPs are calling. Counters are in-memory, so they reset on restart
-// and aren't shared across instances — fine for a single small server.
+// buggy client retry loop, so it runs first and counts every request,
+// rejected ones included (and before multer buffers a 10MB upload). The
+// global daily cap bounds total spend no matter how many IPs are calling, so
+// it runs only after the request has passed validation — a rejected upload
+// costs nothing and mustn't use up the day's budget. Counters are in-memory,
+// so they reset on restart and aren't shared across instances — fine for a
+// single small server.
 const perIpLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: intFromEnv("OCR_RATE_LIMIT_PER_MINUTE", 30),
@@ -76,24 +81,30 @@ const dailyCapLimiter = rateLimit({
   message: { error: "daily_limit_reached", message: "Daily OCR limit reached, try again tomorrow or enter the receipt manually" },
 });
 
-ocrRouter.post("/", perIpLimiter, dailyCapLimiter, upload.single("image"), async (req, res) => {
+// Validated before the daily cap and before calling Vision, so a bad request
+// never costs an API call or a slot in the day's budget.
+const validateOcrRequest: RequestHandler = (req, res, next) => {
   if (!req.file) {
     return res.status(400).json({ error: "missing_image", message: "Expected a multipart 'image' field" });
   }
   if (!req.file.mimetype.startsWith("image/")) {
     return res.status(400).json({ error: "invalid_file_type", message: "Uploaded file must be an image" });
   }
-
-  // Validated before calling Vision so a bad request never costs an API call.
   const parsedBody = ocrBodySchema.safeParse(req.body ?? {});
   if (!parsedBody.success) {
     return res.status(400).json({ error: "invalid_body", issues: parsedBody.error.issues });
   }
-  const { store_code } = parsedBody.data;
+  res.locals.storeCode = parsedBody.data.store_code;
+  next();
+};
+
+ocrRouter.post("/", perIpLimiter, upload.single("image"), validateOcrRequest, dailyCapLimiter, async (req, res) => {
+  const image = req.file as Express.Multer.File;
+  const store_code: string = res.locals.storeCode;
 
   let pages: Awaited<ReturnType<typeof detectReceiptPages>>;
   try {
-    pages = await detectReceiptPages(req.file.buffer);
+    pages = await detectReceiptPages(image.buffer);
   } catch (error) {
     const message = error instanceof Error ? error.message : "OCR request failed";
     return res.status(502).json({ error: "ocr_failed", message });
