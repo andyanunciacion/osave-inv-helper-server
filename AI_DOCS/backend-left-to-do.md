@@ -1,8 +1,8 @@
 # Backend — Left To Do
 
 Reference doc for what's still open on this server repo, last re-checked
-against the code on 2026-10-08 (branch `15-ocr-crossed-out-qty-parser`,
-`npm test` 29/29 passing, `tsc --noEmit` clean). Previous check: 2026-09-25.
+against the code on 2026-10-12 (`develop` at `f29d8ec`, #17 merged via #18;
+`npm test` 29/29 passing, `tsc --noEmit` clean). Previous check: 2026-10-08.
 Companion to `main-file.md` (business rules/roadmap) and
 `frontend-contract.md` (response shapes) — this doc tracks *gaps*, not
 current behavior. Update it as items get resolved rather than letting it go
@@ -16,14 +16,18 @@ backend is in §2 and §3 below.
 
 ---
 
-## 1. Release / deployment (do first)
+## 0. Delivery note — apply the migration with the release
 
-- **`#15` (crossed-out Qty/UOM recovery, `8c706f5`) is committed but not
-  pushed** — there's no `origin/15-…` branch, and `origin/develop` stops at
-  `#12` (`4d17098`). The frontend's `#31` is already merged into *its*
-  `develop` and reads `inferred` / `has_annotation` / `totals` from
-  `/api/ocr`, which only exist on `#15`. Push it, open the PR into `develop`,
-  and ship it together with (or before) that frontend release.
+`PATCH /api/deliveries/:delivery_code/note` is built (`frontend-contract.md`
+§9). Apply `supabase/migrations/20261012000000_add_delivery_note.sql` to the
+Supabase project in the same release; until then the PATCH fails with a 500
+(no `note` column) while every read route keeps working. The validator was
+checked offline (trim, blank → `null`, 500-char cap, missing field); the
+route itself hasn't been run against a real database yet, so try one save
+from the frontend after applying the migration.
+
+## 1. Release / deployment
+
 - **Nothing has been released yet.** `production` is still at the initial
   configuration commit (`ffeea90`); every feature lives on `develop`.
 - **Host not decided.** No deployment config (Dockerfile/Procfile/etc.)
@@ -45,7 +49,7 @@ backend is in §2 and §3 below.
 
 The 2026-10-08 code scan's gaps (1,000-row read cap, non-atomic writes,
 non-UUID `item_id` 500s, OCR daily cap counting rejected uploads, unescaped
-`%`/`_` in search) are fixed in the working tree. What's left:
+`%`/`_` in search) are fixed (`#17`, merged into `develop`). What's left:
 
 - **Apply `supabase/migrations/20261008000000_atomic_delivery_writes.sql`**
   to the Supabase project before this code runs against it. `POST
@@ -135,10 +139,11 @@ policies and no session/API-key check of its own. A shared API-key header
 checked in middleware would be the smallest meaningful step before going
 public; revisit properly if the user base grows past a small trusted group.
 
-- `GET /api/deliveries/:delivery_code`, the PATCH and `/history` take no
-  `store_code` at all. Anyone who knows a delivery code can read or edit it,
-  regardless of the session's store. Add a `store_code` check when auth
-  lands.
+- `GET /api/deliveries/:delivery_code`, the quantity PATCH and `/history`
+  take no `store_code` at all. Anyone who knows a delivery code can read or
+  edit it, regardless of the session's store. Add a `store_code` check when
+  auth lands — the note PATCH already does (filters on both codes, 404 on a
+  mismatch), so copy it from there.
 - `uploaded_by` is saved as `null` on every delivery because the frontend
   never sends it (no reference in its `src/` outside types/tests; checked
   2026-10-08). The server stores it correctly when present. This needs a real
@@ -171,7 +176,8 @@ photos (see CLAUDE.md). Still uncovered:
   section, `DraftHeader.printout_datetime`, the full `totals` comparison
   rules and all of §8 (quantity PATCH). This copy is missing the frontend's
   newer §2 wording (merges keep `status: "success"`, shown on the batch
-  summary). Merge them into one text and copy it to both repos.
+  summary). Merge them into one text and copy it to both repos. §9 (delivery
+  note, 2026-10-12) was written to match in both copies.
 
 ## 7. Deleting a confirmed delivery or item
 
@@ -204,7 +210,7 @@ For anyone reading this later wondering why these *aren't* on the list:
   from the page footer first. Default `OCR_RATE_LIMIT_PER_MINUTE` raised to
   30 so a ~25-page delivery fits in one batch.
 - Crossed-out Qty/UOM recovery, handwriting flag and printed totals block
-  (`#15`, on its branch; see §1): `reconcileItem` row arithmetic, item-history
+  (`#15`, merged into `develop`): `reconcileItem` row arithmetic, item-history
   fill, and an `inferred` array on every item.
 - In-batch duplicate rows are merged (`mergedItems`); a collision with an
   already-saved row is rejected per row (`partial`). The frontend shows both
