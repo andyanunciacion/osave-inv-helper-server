@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { selectAll } from "../lib/select-all.js";
+import { authStoreCode } from "../lib/store-auth.js";
 import { supabase } from "../lib/supabase.js";
 import {
   createDeliverySchema,
@@ -221,9 +222,10 @@ deliveriesRouter.post("/", async (req, res) => {
 });
 
 // The staff's note on a delivery (frontend-contract.md §9): one per delivery,
-// replaced on every save. Unlike the quantity PATCH below, this is scoped to
-// store_code, so one store can't write to another's delivery. No history row —
-// the note is the staff's own remark, not delivered data.
+// replaced on every save. Scoped to store_code (requireStoreAccess has already
+// checked it's the signed-in store), so one store can't write to another's
+// delivery. No history row — the note is the staff's own remark, not
+// delivered data.
 deliveriesRouter.patch("/:delivery_code/note", async (req, res) => {
   const parsed = updateDeliveryNoteSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -267,6 +269,21 @@ deliveriesRouter.patch("/:delivery_code/items/:item_id", async (req, res) => {
   const { delivery_code, item_id } = params.data;
   const { quantity, reason } = parsed.data;
 
+  // The route names no store, so check the delivery is the signed-in store's
+  // before changing anything — another store's item reads as not found.
+  const { data: owned, error: ownedError } = await supabase
+    .from("deliveries")
+    .select("delivery_code")
+    .eq("delivery_code", delivery_code)
+    .eq("store_code", authStoreCode(res))
+    .maybeSingle();
+  if (ownedError) {
+    return res.status(500).json({ error: "internal_error", message: ownedError.message });
+  }
+  if (!owned) {
+    return res.status(404).json({ error: "not_found", message: "delivery item not found" });
+  }
+
   // The quantity change and its history row are one transaction
   // (supabase/migrations/20261008000000_atomic_delivery_writes.sql), so a
   // failed audit insert can't leave the new quantity behind unrecorded.
@@ -302,6 +319,7 @@ deliveriesRouter.get("/:delivery_code/items/:item_id/history", async (req, res) 
   const { data: history, error } = await supabase
     .from("delivery_item_updates")
     .select(DELIVERY_ITEM_UPDATE_COLUMNS)
+    .eq("store_code", authStoreCode(res))
     .eq("delivery_code", delivery_code)
     .eq("item_id", item_id)
     .order("created_at", { ascending: false });
@@ -316,10 +334,12 @@ deliveriesRouter.get("/:delivery_code/items/:item_id/history", async (req, res) 
 deliveriesRouter.get("/:delivery_code", async (req, res) => {
   const { delivery_code } = req.params;
 
+  // Another store's delivery reads as not found.
   const { data: delivery, error: deliveryError } = await supabase
     .from("deliveries")
     .select("*")
     .eq("delivery_code", delivery_code)
+    .eq("store_code", authStoreCode(res))
     .maybeSingle();
 
   if (deliveryError) {

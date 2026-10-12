@@ -1,39 +1,24 @@
 import { Router } from "express";
-import { z } from "zod";
+import { authStoreCode } from "../lib/store-auth.js";
 import { supabase } from "../lib/supabase.js";
-import { normalizeStoreCode } from "../lib/normalize.js";
 
 export const storesRouter = Router();
 
-storesRouter.get("/", async (_req, res) => {
-  const { data, error } = await supabase.from("stores").select("*").order("store_code");
+// The store this request signed in as (frontend-contract.md §10). Reaching
+// this handler at all means the code + passcode headers were accepted, so
+// the frontend calls it to check a passcode when staff enter one. Stores are
+// created and given passcodes with scripts/set-store-passcode.ts, not over
+// the API — and there's no route listing every store.
+storesRouter.get("/current", async (_req, res) => {
+  const { data: store, error } = await supabase
+    .from("stores")
+    .select("store_code, name")
+    .eq("store_code", authStoreCode(res))
+    .single();
 
   if (error) {
     return res.status(500).json({ error: "internal_error", message: error.message });
   }
 
-  res.json({ stores: data });
-});
-
-const createStoreSchema = z.object({
-  store_code: z.string().trim().min(1).transform(normalizeStoreCode),
-  name: z.string().trim().min(1),
-});
-
-storesRouter.post("/", async (req, res) => {
-  const parsed = createStoreSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "invalid_body", issues: parsed.error.issues });
-  }
-
-  const { data, error } = await supabase.from("stores").insert(parsed.data).select().single();
-
-  if (error) {
-    if (error.code === "23505") {
-      return res.status(409).json({ error: "duplicate_store", message: "store_code already exists" });
-    }
-    return res.status(500).json({ error: "internal_error", message: error.message });
-  }
-
-  res.status(201).json({ store: data });
+  res.json({ store });
 });

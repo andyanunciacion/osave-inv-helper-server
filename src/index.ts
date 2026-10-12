@@ -3,6 +3,7 @@ import cors from "cors";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
 import multer from "multer";
+import { passcodeAttemptLimiter, requireStoreAccess } from "./lib/store-auth.js";
 import { storesRouter } from "./routes/stores.js";
 import { deliveriesRouter } from "./routes/deliveries.js";
 import { searchRouter } from "./routes/search.js";
@@ -10,6 +11,16 @@ import { ocrRouter } from "./routes/ocr.js";
 
 const app = express();
 const port = process.env.PORT ?? 4000;
+
+// Hosts like Railway/Render put the app behind a proxy, so every request
+// arrives from the proxy's IP; TRUST_PROXY (the number of proxy hops) makes
+// req.ip the caller's, which the per-IP OCR and passcode limiters key on.
+// Off unless set: trusting a proxy that isn't there would let any caller fake
+// their IP with an X-Forwarded-For header and dodge those limits.
+const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY ?? "", 10);
+if (Number.isFinite(trustProxyHops) && trustProxyHops > 0) {
+  app.set("trust proxy", trustProxyHops);
+}
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:3000")
   .split(",")
@@ -22,6 +33,11 @@ app.use(express.json());
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
+
+// Every /api route needs the store's passcode (src/lib/store-auth.ts);
+// /health stays open for the host's health checks. CORS answers preflight
+// requests above, before this, so the browser can ask to send the headers.
+app.use("/api", passcodeAttemptLimiter, requireStoreAccess);
 
 app.use("/api/stores", storesRouter);
 app.use("/api/deliveries", deliveriesRouter);

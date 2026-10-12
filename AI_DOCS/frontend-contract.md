@@ -553,3 +553,52 @@ the batch, so a later upload of another page shows the note already saved.
     the typed text; the response body's error shape isn't read.
 - Until the column exists the frontend reads a missing `note` as `null`, so
   search and upload keep working; only saving a note fails.
+
+---
+
+## 10. Store access — passcode on every request
+
+Added 2026-10-13 (backend branch `21-store-passcode-access`, UI branch
+`52-store-passcode-access`). Each store has one staff passcode
+(`main-file.md` §5, store passcode rule); a store code alone no longer grants access.
+
+**Every `/api` request** (not `/health`) carries:
+
+```
+X-Store-Code: 245          // the session's store, trim + uppercase
+X-Store-Passcode: <passcode>
+```
+
+- Missing headers, or a wrong passcode → **401** `{ error: "unauthorized" }`.
+- A store with no passcode set, or no row at all → **401**
+  `{ error: "store_not_set_up" }`. Stores are created and given passcodes
+  with the backend's `npm run store:passcode -- <store_code> [name]`, never
+  over the API — and no longer on first upload.
+- A `store_code` in the query string or JSON body that isn't the header's
+  store → **403** `{ error: "forbidden" }`. `/api/ocr`'s multipart
+  `store_code` field gets the same check in the route.
+- Routes that take only a delivery code (`GET /api/deliveries/:delivery_code`,
+  the quantity PATCH, `/history`) only see the signed-in store's rows —
+  another store's delivery is a 404.
+- More than `PASSCODE_ATTEMPTS_PER_15_MIN` (default 10) 401s from one IP in
+  15 minutes → **429** `{ error: "too_many_attempts" }` for every request
+  from that IP until the window ends.
+- Passcodes are printable ASCII, no spaces, at least 6 characters — they
+  travel in a header, which browsers limit to Latin-1.
+
+**`GET /api/stores/current`** → `{ store: { store_code, name } }` — the
+store the headers signed in as. Reaching it at all means the pair was
+accepted, so it's how the store screen checks a passcode before saving it.
+`GET /api/stores` (list every store) and `POST /api/stores` are gone.
+
+**Frontend side:**
+- `src/lib/store-session-storage.ts` keeps the store code and passcode in
+  localStorage (`osave.store_code`, `osave.store_passcode`).
+- `backendFetch` (`src/lib/api-client.ts`) is the only way the app calls the
+  backend: it adds both headers, and on any 401 forgets the passcode (keeping
+  the code), so `useRequireStoreSession` sends staff back to the store screen
+  to re-enter it — e.g. after the manager changes it.
+- The store screen (`StoreCodeForm`, `useStoreSignIn`) checks a code +
+  passcode with `GET /api/stores/current` before saving them; the passcode can
+  be left blank when this phone already has it for that code. A QR scan
+  (`QrScanView`) fills in only the store code, then asks for the passcode.

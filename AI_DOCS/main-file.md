@@ -81,6 +81,8 @@ Everything reads/writes through Supabase's client SDK, which also handles the re
 create table stores (
   store_code text primary key,
   name text not null,
+  passcode_hash text,                 -- hashed staff passcode (§5, store passcode rule); a store
+                                       -- without one can't be used
   created_at timestamptz default now()
 );
 
@@ -149,13 +151,14 @@ I'd default to option 1 for MVP — it's a small addition and keeps the rule air
 6. The receipt's printed "To" store code (`receipt_store_code` — the first number in the "To:" line; the address after it is ignored) must match the session's `store_code`. A mismatch is **rejected**, so a receipt for one store can't land in another store's records: `/api/ocr` returns 409 `store_mismatch` before any items are returned, and `POST /api/deliveries` returns `status: "store_mismatch"` and writes nothing. (This replaces the earlier warn-only rule.) `receipt_store_code` is **required** on `POST /api/deliveries` (400 if missing or blank), including for manual entry — staff type it from the paper receipt. If OCR couldn't read the "To" code, `/api/ocr` returns it blank instead of rejecting, and the user must fill it in before the delivery can be saved.
 7. A physical receipt can span several photographed pages ("Page 10 of 12"), and every page prints the same "Inv. Tran. No.". A later page for the **same store** appends its items to the existing delivery (rule 3 still rejects individual duplicate items); a page whose items are all duplicates, or the same code under a **different store**, comes back as `duplicate_delivery`.
 8. When a photo's "To:" store code can't be read — the digits themselves obscured (a folded corner, a staple, a sticker), or even the "To:" label itself obscured so there's nothing to anchor the search from — it isn't necessarily hand-typed by the user. Every page of one physical receipt also prints an identical "Date and hour of printout" (down to the second, and printed a second time in the page footer as extra redundancy), so a multi-photo upload can recover it from a sibling page instead: if exactly one other page in the same upload shares that exact timestamp *and* has a store code that read cleanly, that code is copied over and flagged as inferred rather than OCR'd (`POST /api/ocr/reconcile`, §7). No match, or siblings that disagree, leaves it blank — same as today, the user fills it in by hand. This is a same-upload cross-check only: it never looks at previously-saved deliveries, and rule 6's mismatch check still applies to an inferred code exactly as it would to a directly-read one.
+9. **Store passcode.** Every store has a staff passcode, and a store code alone no longer grants access: every API request carries the store code and its passcode, and can only read or change that store's data. Stores are set up ahead of time — the store row and its passcode are created with the backend's `npm run store:passcode` script — and a store code that hasn't been set up is refused, rather than being created on first use as it used to be. One passcode per store, shared by its staff (2–3 trusted people); changing it signs every phone out of that store.
 
 ---
 
 ## 6. Key User Flows
 
 **A. Store session**
-Enter or scan store code → store it in `localStorage` → every screen after this is scoped to that store until changed.
+Enter or scan store code, then enter that store's passcode (§5, store passcode rule) → the backend checks the pair → both are kept in `localStorage` → every screen after this is scoped to that store until changed. If the passcode stops working (changed by the manager), the next request sends staff back to re-enter it.
 
 **B. Upload flow**
 1. Take/upload one or more photos of the delivery receipt.
