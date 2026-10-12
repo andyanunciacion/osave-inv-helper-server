@@ -33,6 +33,13 @@ export const updateDeliveryItemQuantitySchema = z.object({
 
 export type UpdateDeliveryItemQuantityInput = z.infer<typeof updateDeliveryItemQuantitySchema>;
 
+export const deliveryItemParamsSchema = z.object({
+  delivery_code: z.string(),
+  // z.guid(), not z.uuid(): any 8-4-4-4-12 hex string, as Postgres accepts,
+  // without zod's RFC version/variant checks.
+  item_id: z.guid(),
+});
+
 export const searchQuerySchema = z
   .object({
     store_code: z.string().trim().min(1).transform(normalizeStoreCode),

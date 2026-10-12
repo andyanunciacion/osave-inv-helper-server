@@ -1,6 +1,12 @@
 import { Router } from "express";
+import { selectAll } from "../lib/select-all.js";
 import { supabase } from "../lib/supabase.js";
-import { createDeliverySchema, recentQuerySchema, updateDeliveryItemQuantitySchema } from "../validators/delivery.js";
+import {
+  createDeliverySchema,
+  deliveryItemParamsSchema,
+  recentQuerySchema,
+  updateDeliveryItemQuantitySchema,
+} from "../validators/delivery.js";
 import type { DeliveryItemInput } from "../validators/delivery.js";
 
 export const deliveriesRouter = Router();
@@ -28,7 +34,7 @@ const sumOrNull = (values: Array<number | null | undefined>): number | null => {
 // get combined instead of the second being rejected as a duplicate — but
 // only within this one submitted batch; an item that collides with a row
 // already saved from an earlier page is still a genuine duplicate and falls
-// through to the existing 23505 handling below.
+// through to create_delivery's rejected_items below.
 //
 // Grouped by the same key as delivery_items.dedupe_key (supabase/schema.sql)
 // so a merge here can never hide a collision the DB would otherwise catch.
@@ -105,10 +111,11 @@ deliveriesRouter.get("/recent", async (req, res) => {
   const itemsByDelivery = new Map<string, unknown[]>();
 
   if (codes.length > 0) {
-    const { data: items, error: itemsError } = await supabase
-      .from("delivery_items")
-      .select(DELIVERY_ITEM_COLUMNS)
-      .in("delivery_code", codes);
+    // A full delivery runs to ~600 items, so five of them pass PostgREST's
+    // row cap — page through instead of trusting one response.
+    const { data: items, error: itemsError } = await selectAll((from, to) =>
+      supabase.from("delivery_items").select(DELIVERY_ITEM_COLUMNS).in("delivery_code", codes).order("id").range(from, to),
+    );
 
     if (itemsError) {
       return res.status(500).json({ error: "internal_error", message: itemsError.message });
@@ -149,19 +156,6 @@ deliveriesRouter.post("/", async (req, res) => {
     });
   }
 
-  // The frontend's store-session flow never registers a store ahead of time —
-  // staff just type/scan a code and start uploading (main-file.md §6 flow A).
-  // Auto-register it here so deliveries.store_code's FK doesn't block the
-  // first delivery for a new store; ignoreDuplicates means an existing
-  // store's name is never overwritten.
-  const { error: storeUpsertError } = await supabase
-    .from("stores")
-    .upsert({ store_code: input.store_code, name: input.store_code }, { onConflict: "store_code", ignoreDuplicates: true });
-
-  if (storeUpsertError) {
-    return res.status(500).json({ error: "internal_error", message: storeUpsertError.message });
-  }
-
   const duplicateDelivery = {
     status: "duplicate_delivery",
     delivery: null,
@@ -170,109 +164,55 @@ deliveriesRouter.post("/", async (req, res) => {
     mergedItems: [],
   };
 
-  const { data: inserted, error: deliveryError } = await supabase
-    .from("deliveries")
-    .insert({
-      delivery_code: input.delivery_code,
-      store_code: input.store_code,
-      warehouse_code: input.warehouse_code ?? null,
-      delivery_date: input.delivery_date,
-      receipt_store_code: input.receipt_store_code,
-      uploaded_by: input.uploaded_by ?? null,
-      status: "confirmed",
-    })
-    .select()
-    .single();
-
-  let delivery = inserted;
-  let appending = false;
-
-  if (deliveryError) {
-    if (deliveryError.code !== "23505") {
-      return res.status(500).json({ error: "internal_error", message: deliveryError.message });
-    }
-
-    // One receipt spans several photographed pages ("Page 10 of 12"), and
-    // every page prints the same "Inv. Tran. No.". A later page for the same
-    // store appends its items to the delivery already stored; the same code
-    // under another store is a genuine duplicate.
-    const { data: existing, error: existingError } = await supabase
-      .from("deliveries")
-      .select("*")
-      .eq("delivery_code", input.delivery_code)
-      .maybeSingle();
-
-    if (existingError) {
-      return res.status(500).json({ error: "internal_error", message: existingError.message });
-    }
-    if (!existing || existing.store_code !== input.store_code) {
-      return res.json(duplicateDelivery);
-    }
-    delivery = existing;
-    appending = true;
-  }
-
   const { items: mergedInputItems, merged: mergedItems } = mergeDuplicateItems(input.items);
 
-  const rowsToInsert = mergedInputItems.map((item) => ({
-    delivery_code: input.delivery_code,
-    store_code: input.store_code,
-    item_code: item.item_code ?? null,
-    item_name: item.item_name,
-    unit_count: item.unit_count ?? null,
-    quantity: item.quantity ?? null,
-    unit: item.unit ?? null,
-    item_price: item.item_price ?? null,
-    total_item_price: item.total_item_price ?? null,
-  }));
+  // One transaction (supabase/migrations/20261008000000_atomic_delivery_writes.sql):
+  // auto-registers the store (staff never register one ahead of time,
+  // main-file.md §6 flow A), creates the delivery or — when this store
+  // already has it — appends to it, since every photographed page of one
+  // receipt prints the same "Inv. Tran. No.". The same code under another
+  // store is a genuine duplicate. An item already saved on the delivery is
+  // skipped and comes back in rejected_items instead of failing the batch
+  // (main-file.md §5 rule 5). A failure writes nothing.
+  const { data: result, error } = await supabase.rpc("create_delivery", {
+    p_delivery_code: input.delivery_code,
+    p_store_code: input.store_code,
+    p_warehouse_code: input.warehouse_code ?? null,
+    p_delivery_date: input.delivery_date,
+    p_receipt_store_code: input.receipt_store_code,
+    p_uploaded_by: input.uploaded_by ?? null,
+    p_items: mergedInputItems.map((item) => ({
+      item_code: item.item_code ?? null,
+      item_name: item.item_name,
+      unit_count: item.unit_count ?? null,
+      quantity: item.quantity ?? null,
+      unit: item.unit ?? null,
+      item_price: item.item_price ?? null,
+      total_item_price: item.total_item_price ?? null,
+    })),
+  });
 
-  const acceptedItems: unknown[] = [];
-  const rejectedItems: Array<{ item_code: string | null; item_name: string; reason: "duplicate_item_code" }> = [];
-
-  const { data: insertedAll, error: bulkError } = await supabase
-    .from("delivery_items")
-    .insert(rowsToInsert)
-    .select(DELIVERY_ITEM_COLUMNS);
-
-  if (!bulkError) {
-    acceptedItems.push(...(insertedAll ?? []));
-  } else if (bulkError.code === "23505") {
-    // Fall back to per-row inserts so a duplicate is rejected on its own row
-    // instead of failing the whole batch (main-file.md §5 rule 5).
-    for (const row of rowsToInsert) {
-      const { data: inserted, error: rowError } = await supabase
-        .from("delivery_items")
-        .insert(row)
-        .select(DELIVERY_ITEM_COLUMNS)
-        .single();
-
-      if (rowError) {
-        if (rowError.code === "23505") {
-          rejectedItems.push({
-            item_code: row.item_code,
-            item_name: row.item_name,
-            reason: "duplicate_item_code",
-          });
-        } else {
-          return res.status(500).json({ error: "internal_error", message: rowError.message });
-        }
-      } else {
-        acceptedItems.push(inserted);
-      }
-    }
-  } else {
-    return res.status(500).json({ error: "internal_error", message: bulkError.message });
+  if (error) {
+    return res.status(500).json({ error: "internal_error", message: error.message });
   }
+  if (result.duplicate) {
+    return res.json(duplicateDelivery);
+  }
+
+  const acceptedItems: unknown[] = result.accepted_items;
+  const rejectedItems = (result.rejected_items as Array<{ item_code: string | null; item_name: string }>).map(
+    (item) => ({ ...item, reason: "duplicate_item_code" as const }),
+  );
 
   // Nothing new on a page that appends to an existing delivery means this
   // exact page was already uploaded.
-  if (appending && acceptedItems.length === 0) {
+  if (result.appending && acceptedItems.length === 0) {
     return res.json(duplicateDelivery);
   }
 
   res.json({
     status: rejectedItems.length > 0 ? "partial" : "success",
-    delivery,
+    delivery: result.delivery,
     acceptedItems,
     rejectedItems,
     mergedItems,
@@ -283,70 +223,50 @@ deliveriesRouter.post("/", async (req, res) => {
 // record of the change (main-file.md §12's "edit log" suggestion — see
 // CLAUDE.md for why this is scoped to quantity rather than a general PATCH).
 deliveriesRouter.patch("/:delivery_code/items/:item_id", async (req, res) => {
+  // A malformed item_id can't name a row; without this, Postgres rejects the
+  // uuid cast (22P02) and it surfaces as a 500.
+  const params = deliveryItemParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    return res.status(404).json({ error: "not_found", message: "delivery item not found" });
+  }
   const parsed = updateDeliveryItemQuantitySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "invalid_body", issues: parsed.error.issues });
   }
-  const { delivery_code, item_id } = req.params;
+  const { delivery_code, item_id } = params.data;
   const { quantity, reason } = parsed.data;
 
-  const { data: existing, error: fetchError } = await supabase
-    .from("delivery_items")
-    .select(DELIVERY_ITEM_COLUMNS)
-    .eq("id", item_id)
-    .eq("delivery_code", delivery_code)
-    .maybeSingle();
+  // The quantity change and its history row are one transaction
+  // (supabase/migrations/20261008000000_atomic_delivery_writes.sql), so a
+  // failed audit insert can't leave the new quantity behind unrecorded.
+  // No-op corrections (resubmitting the same value) don't get a history row —
+  // there's nothing that actually changed to audit.
+  const { data: result, error } = await supabase.rpc("update_delivery_item_quantity", {
+    p_delivery_code: delivery_code,
+    p_item_id: item_id,
+    p_quantity: quantity,
+    p_reason: reason ?? null,
+  });
 
-  if (fetchError) {
-    return res.status(500).json({ error: "internal_error", message: fetchError.message });
+  if (error) {
+    return res.status(500).json({ error: "internal_error", message: error.message });
   }
-  if (!existing) {
+  if (!result) {
     return res.status(404).json({ error: "not_found", message: "delivery item not found" });
   }
 
-  const previousQuantity = existing.quantity;
-
-  const { data: updated, error: updateError } = await supabase
-    .from("delivery_items")
-    .update({ quantity })
-    .eq("id", item_id)
-    .select(DELIVERY_ITEM_COLUMNS)
-    .single();
-
-  if (updateError) {
-    return res.status(500).json({ error: "internal_error", message: updateError.message });
-  }
-
-  // No-op corrections (resubmitting the same value) don't get a history row —
-  // there's nothing that actually changed to audit.
-  let update: unknown = null;
-  if (previousQuantity !== quantity) {
-    const { data: historyRow, error: historyError } = await supabase
-      .from("delivery_item_updates")
-      .insert({
-        item_id,
-        delivery_code,
-        store_code: existing.store_code,
-        previous_quantity: previousQuantity,
-        new_quantity: quantity,
-        reason: reason ?? null,
-      })
-      .select(DELIVERY_ITEM_UPDATE_COLUMNS)
-      .single();
-
-    if (historyError) {
-      return res.status(500).json({ error: "internal_error", message: historyError.message });
-    }
-    update = historyRow;
-  }
-
-  res.json({ item: updated, update });
+  res.json({ item: result.item, update: result.update });
 });
 
 // The audit trail for the route above — every quantity correction made to
 // this item, most recent first.
 deliveriesRouter.get("/:delivery_code/items/:item_id/history", async (req, res) => {
-  const { delivery_code, item_id } = req.params;
+  // A malformed item_id has no history, same as an unknown one.
+  const params = deliveryItemParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    return res.json({ history: [] });
+  }
+  const { delivery_code, item_id } = params.data;
 
   const { data: history, error } = await supabase
     .from("delivery_item_updates")
@@ -378,11 +298,15 @@ deliveriesRouter.get("/:delivery_code", async (req, res) => {
     return res.status(404).json({ error: "not_found", message: "delivery not found" });
   }
 
-  const { data: items, error: itemsError } = await supabase
-    .from("delivery_items")
-    .select(DELIVERY_ITEM_COLUMNS)
-    .eq("delivery_code", delivery_code)
-    .order("item_code");
+  const { data: items, error: itemsError } = await selectAll((from, to) =>
+    supabase
+      .from("delivery_items")
+      .select(DELIVERY_ITEM_COLUMNS)
+      .eq("delivery_code", delivery_code)
+      .order("item_code")
+      .order("id")
+      .range(from, to),
+  );
 
   if (itemsError) {
     return res.status(500).json({ error: "internal_error", message: itemsError.message });
