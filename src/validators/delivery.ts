@@ -33,6 +33,22 @@ export const updateDeliveryItemQuantitySchema = z.object({
 
 export type UpdateDeliveryItemQuantityInput = z.infer<typeof updateDeliveryItemQuantitySchema>;
 
+// The frontend caps the input at the same length (DELIVERY_NOTE_MAX_LENGTH).
+const DELIVERY_NOTE_MAX_LENGTH = 500;
+
+export const updateDeliveryNoteSchema = z.object({
+  store_code: z.string().trim().min(1).transform(normalizeStoreCode),
+  // Blank after trimming clears the note, same as sending null.
+  note: z
+    .string()
+    .trim()
+    .max(DELIVERY_NOTE_MAX_LENGTH)
+    .nullable()
+    .transform((v) => v || null),
+});
+
+export type UpdateDeliveryNoteInput = z.infer<typeof updateDeliveryNoteSchema>;
+
 export const deliveryItemParamsSchema = z.object({
   delivery_code: z.string(),
   // z.guid(), not z.uuid(): any 8-4-4-4-12 hex string, as Postgres accepts,

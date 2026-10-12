@@ -98,6 +98,10 @@ create table deliveries (
                                        -- to retain original photos (see §7). Leave
                                        -- null/unused for a text-only pipeline.
   uploaded_by text,                   -- device/session identifier
+  note text,                          -- staff's free-text note, added on the upload's
+                                       -- success screen or later from a search result;
+                                       -- one per delivery, replaced on save. Shown in
+                                       -- search results.
   status text default 'processing',   -- processing | confirmed | failed
   created_at timestamptz default now()
 );

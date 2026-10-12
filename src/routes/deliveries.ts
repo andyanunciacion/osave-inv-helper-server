@@ -6,6 +6,7 @@ import {
   deliveryItemParamsSchema,
   recentQuerySchema,
   updateDeliveryItemQuantitySchema,
+  updateDeliveryNoteSchema,
 } from "../validators/delivery.js";
 import type { DeliveryItemInput } from "../validators/delivery.js";
 
@@ -217,6 +218,36 @@ deliveriesRouter.post("/", async (req, res) => {
     rejectedItems,
     mergedItems,
   });
+});
+
+// The staff's note on a delivery (frontend-contract.md §9): one per delivery,
+// replaced on every save. Unlike the quantity PATCH below, this is scoped to
+// store_code, so one store can't write to another's delivery. No history row —
+// the note is the staff's own remark, not delivered data.
+deliveriesRouter.patch("/:delivery_code/note", async (req, res) => {
+  const parsed = updateDeliveryNoteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_body", issues: parsed.error.issues });
+  }
+  const { delivery_code } = req.params;
+  const { store_code, note } = parsed.data;
+
+  const { data: delivery, error } = await supabase
+    .from("deliveries")
+    .update({ note })
+    .eq("delivery_code", delivery_code)
+    .eq("store_code", store_code)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    return res.status(500).json({ error: "internal_error", message: error.message });
+  }
+  if (!delivery) {
+    return res.status(404).json({ error: "not_found", message: "delivery not found" });
+  }
+
+  res.json({ delivery });
 });
 
 // Quantity-only correction for an already-confirmed item, with an audit

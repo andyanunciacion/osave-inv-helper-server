@@ -21,6 +21,8 @@ create table if not exists deliveries (
                                         -- for the mismatch warning (rule 6)
   source_images text[],                -- unused in the text-only pipeline
   uploaded_by text,                    -- device/session identifier
+  note text,                           -- staff's free-text note from the upload's
+                                        -- success screen; replaced on each save
   status text default 'confirmed',     -- processing | confirmed | failed
   created_at timestamptz default now()
 );
