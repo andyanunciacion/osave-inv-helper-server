@@ -7,6 +7,9 @@ create extension if not exists pgcrypto;
 create table if not exists stores (
   store_code text primary key,
   name text not null,
+  passcode_hash text,                  -- scrypt hash of the staff passcode
+                                        -- (src/lib/passcode.ts); null = store
+                                        -- can't be used until one is set
   created_at timestamptz default now()
 );
 

@@ -1,8 +1,9 @@
 # Backend — Left To Do
 
 Reference doc for what's still open on this server repo, last re-checked
-against the code on 2026-10-12 (`develop` at `f29d8ec`, #17 merged via #18;
-`npm test` 29/29 passing, `tsc --noEmit` clean). Previous check: 2026-10-08.
+against the code on 2026-10-13 (branch `21-store-passcode-access` off
+`develop` at `9875c89`; `npm test` 40/40 passing, `tsc --noEmit` clean).
+Previous check: 2026-10-12.
 Companion to `main-file.md` (business rules/roadmap) and
 `frontend-contract.md` (response shapes) — this doc tracks *gaps*, not
 current behavior. Update it as items get resolved rather than letting it go
@@ -20,13 +21,19 @@ backend is in §2 and §3 below.
 
 - **Nothing has been released yet.** `production` is still at the initial
   configuration commit (`ffeea90`); every feature lives on `develop`.
-- **Host not decided.** No deployment config (Dockerfile/Procfile/etc.)
-  exists — scaffolding depends entirely on the target (Render/Railway/
-  Fly.io/VPS/etc. all differ). Revisit this section once one is picked.
-- **Set Express's `trust proxy` once the host is known.** Nearly every host
-  puts the app behind a proxy; without it the per-IP OCR limiter sees the
-  proxy's IP, so all users share one 30/minute bucket. Not set anywhere in
-  `src/index.ts` today.
+- **Host: Railway** (frontend on Vercel), starting on the free tiers. It has
+  to stay one always-on instance, not serverless: the OCR and passcode
+  limiters are in-memory, and a serverless body cap (~4.5MB) would undercut
+  the 10MB photo limit the frontend's compression (#47) is tuned to. Before
+  the first deploy:
+  - Store 245 has a **test** passcode (set 2026-10-13 for the end-to-end
+    check). Set the real one with `npm run store:passcode -- 245` before
+    staff use it, and give any other store its own (§4) — a store without
+    one is refused.
+  - Set `TRUST_PROXY=1` on Railway (`src/index.ts`). Leave it unset locally.
+  - Set `ALLOWED_ORIGINS` to the Vercel URL, and the Supabase/Google env vars.
+  - Check what Railway's free tier allows (credit, sleeping): a sleeping
+    server makes the first upload after a break slow.
 - **OCR rate limiting is in-memory** (`src/routes/ocr.ts`): counters reset on
   restart and aren't shared across instances. Fine for a single instance;
   needs a shared store (e.g. Redis) if the host ever scales out.
@@ -114,21 +121,19 @@ and each page's sum of totals equals its printed "Total Value". Still open:
 
 ## 4. Auth / access control
 
-**Deliberately deferred for this MVP's scale** (2–3 trusted staff users), but
-it becomes a real exposure the moment the server is deployed to a public URL
-(§1). Right now the only access control on this API is the CORS origin
-allowlist (`ALLOWED_ORIGINS`) — anyone who can reach the server directly
-(not through a browser, so CORS doesn't apply) can read/write any store's
-data, since the server always uses the Supabase service-role key with no RLS
-policies and no session/API-key check of its own. A shared API-key header
-checked in middleware would be the smallest meaningful step before going
-public; revisit properly if the user base grows past a small trusted group.
+Per-store passcodes are in (`frontend-contract.md` §10, `src/lib/store-auth.ts`):
+every `/api` request needs the store code and that store's passcode, may only
+touch that store's data, and wrong passcodes are rate-limited per IP. What's
+still open:
 
-- `GET /api/deliveries/:delivery_code`, the quantity PATCH and `/history`
-  take no `store_code` at all. Anyone who knows a delivery code can read or
-  edit it, regardless of the session's store. Add a `store_code` check when
-  auth lands — the note PATCH already does (filters on both codes, 404 on a
-  mismatch), so copy it from there.
+- **Shared passcode per store, not per person.** Anyone who has a store's
+  passcode is that store; there's no way to tell staff apart or revoke one
+  phone (changing the passcode signs every phone out). Fine for 2–3 trusted
+  staff. Real per-user accounts (e.g. Supabase Auth) if that ever changes.
+- **The passcode is kept on the phone** (localStorage) so staff don't retype
+  it. Anyone holding an unlocked phone with the app open has access.
+- **The passcode lockout is in-memory**, like the OCR limits (§1): a restart
+  resets it, and it's per instance.
 - `uploaded_by` is saved as `null` on every delivery because the frontend
   never sends it (no reference in its `src/` outside types/tests; checked
   2026-10-08). The server stores it correctly when present. This needs a real
@@ -137,7 +142,8 @@ public; revisit properly if the user base grows past a small trusted group.
 ## 5. Testing
 
 Vitest is set up (`npm test`), covering `receipt-parser.ts` against 12 real
-photos (see CLAUDE.md). Still uncovered:
+photos (see CLAUDE.md), passcode hashing, and the `requireStoreAccess`
+middleware (Supabase mocked). Still uncovered:
 - Delivery duplicate-detection (`POST /api/deliveries`): the
   `create_delivery` function's append/reject paths, plus the `dedupe_key`
   generated-column behaviour for code-less items. These were checked once
@@ -211,4 +217,12 @@ For anyone reading this later wondering why these *aren't* on the list:
   error page.
 - OCR upload mimetype validation — non-image uploads are rejected before
   hitting the Vision API.
-- CORS origin allowlist (`ALLOWED_ORIGINS`).
+- CORS origin allowlist (`ALLOWED_ORIGINS`). It only binds browsers; the
+  passcode check (§4) is what stops direct callers.
+- `trust proxy` (`TRUST_PROXY` env, `src/index.ts`), so per-IP limits see
+  the caller behind Railway's proxy.
+- Store passcodes (`#21`, `frontend-contract.md` §10): `add_store_passcode`
+  applied to the Supabase project 2026-10-13, and checked end to end against
+  the frontend's `#52` — sign-in, wrong passcode, a refused (changed)
+  passcode sending staff back to re-enter it, another store's data → 403.
+  Not yet exercised live: the 10-wrong-passcodes lockout and `/api/ocr`.

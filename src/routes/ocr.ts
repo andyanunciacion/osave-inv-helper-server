@@ -2,8 +2,10 @@ import { Router } from "express";
 import type { RequestHandler } from "express";
 import { rateLimit } from "express-rate-limit";
 import multer from "multer";
+import { intFromEnv } from "../lib/env.js";
 import { normalizeStoreCode } from "../lib/normalize.js";
 import { applyItemHistory, parseReceipt, type ItemHistory, type ParsedReceipt } from "../lib/receipt-parser.js";
+import { authStoreCode } from "../lib/store-auth.js";
 import { supabase } from "../lib/supabase.js";
 import { detectReceiptPages } from "../lib/vision.js";
 import { ocrBodySchema, ocrReconcileBodySchema } from "../validators/ocr.js";
@@ -51,11 +53,6 @@ async function withItemHistory(receipt: ParsedReceipt, storeCode: string): Promi
   return applyItemHistory(receipt, history);
 }
 
-function intFromEnv(name: string, fallback: number): number {
-  const parsed = Number.parseInt(process.env[name] ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
 // Every accepted request is one billed Vision call. The per-IP limit stops a
 // buggy client retry loop, so it runs first and counts every request,
 // rejected ones included (and before multer buffers a 10MB upload). The
@@ -93,6 +90,11 @@ const validateOcrRequest: RequestHandler = (req, res, next) => {
   const parsedBody = ocrBodySchema.safeParse(req.body ?? {});
   if (!parsedBody.success) {
     return res.status(400).json({ error: "invalid_body", issues: parsedBody.error.issues });
+  }
+  // The multipart body isn't parsed when requireStoreAccess runs, so the
+  // store_code field is checked against the signed-in store here.
+  if (parsedBody.data.store_code !== authStoreCode(res)) {
+    return res.status(403).json({ error: "forbidden", message: "This request is for a different store" });
   }
   res.locals.storeCode = parsedBody.data.store_code;
   next();
