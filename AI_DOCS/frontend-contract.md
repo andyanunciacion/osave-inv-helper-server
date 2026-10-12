@@ -491,9 +491,9 @@ list is expected to stay small at this project's scale).
 
 **Built on this server** (branch `19-add-delivery-note`, 2026-10-12) to the
 spec below, matching the frontend side (UI branch
-`49-add-note-on-the-success-page-of-uploading`). Saving only works once
-`supabase/migrations/20261012000000_add_delivery_note.sql` has been applied
-to the Supabase project.
+`49-add-note-on-the-success-page-of-uploading`).
+`supabase/migrations/20261012000000_add_delivery_note.sql` is applied to the
+Supabase project (2026-10-12).
 
 **Hook:** `useUpdateDeliveryNote()` → `updateNote(deliveryCode, input): Promise<Delivery>`
 (`features/deliveries/hooks/use-update-delivery-note.ts`), driven by

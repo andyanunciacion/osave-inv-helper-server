@@ -16,16 +16,6 @@ backend is in §2 and §3 below.
 
 ---
 
-## 0. Delivery note — apply the migration with the release
-
-`PATCH /api/deliveries/:delivery_code/note` is built (`frontend-contract.md`
-§9). Apply `supabase/migrations/20261012000000_add_delivery_note.sql` to the
-Supabase project in the same release; until then the PATCH fails with a 500
-(no `note` column) while every read route keeps working. The validator was
-checked offline (trim, blank → `null`, 500-char cap, missing field); the
-route itself hasn't been run against a real database yet, so try one save
-from the frontend after applying the migration.
-
 ## 1. Release / deployment
 
 - **Nothing has been released yet.** `production` is still at the initial
@@ -51,11 +41,6 @@ The 2026-10-08 code scan's gaps (1,000-row read cap, non-atomic writes,
 non-UUID `item_id` 500s, OCR daily cap counting rejected uploads, unescaped
 `%`/`_` in search) are fixed (`#17`, merged into `develop`). What's left:
 
-- **Apply `supabase/migrations/20261008000000_atomic_delivery_writes.sql`**
-  to the Supabase project before this code runs against it. `POST
-  /api/deliveries` and the quantity PATCH now call its functions via
-  `supabase.rpc`, and fail with a 500 until they exist. Ship it with the
-  same release as the code.
 - **Confirm the project's `max_rows` is at least 1000** (Dashboard →
   Settings → API). `selectAll` pages in slices of 1000 and treats a shorter
   slice as the last one. A lower cap would truncate again, silently.
@@ -202,8 +187,14 @@ invalidate `["deliveries", storeCode]` on each event.
 ## Already handled (kept here only as context, not a to-do)
 
 For anyone reading this later wondering why these *aren't* on the list:
-- The `add_unit_count` and `add_delivery_item_updates` migrations have been
-  applied to the Supabase project (`atomic_delivery_writes` hasn't, see §2).
+- Every migration in `supabase/migrations/` has been applied to the Supabase
+  project, including `atomic_delivery_writes` (`#17`) — the
+  `update_delivery_item_quantity` function answered a no-match call on
+  2026-10-12.
+- Delivery note (`#19`, `frontend-contract.md` §9): `add_delivery_note` applied
+  to the Supabase project 2026-10-12; the column and the PATCH's update query
+  were checked against it (a non-matching code returns no row → 404). A real
+  save from the frontend hasn't been tried yet.
 - Multi-page upload (`#12`, merged): `/api/ocr/reconcile` cross-checks store
   codes across pages of one receipt via the printed printout timestamp
   (`main-file.md` §5 rule 8); the parser reads the timestamp and warehouse
