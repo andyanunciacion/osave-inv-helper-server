@@ -24,8 +24,10 @@ backend is in §2 and §3 below.
 - **Host: Railway** (frontend on Vercel), starting on the free tiers. It has
   to stay one always-on instance, not serverless: the OCR and passcode
   limiters are in-memory, and a serverless body cap (~4.5MB) would undercut
-  the 10MB photo limit the frontend's compression (#47) is tuned to. Before
-  the first deploy:
+  the 10MB photo limit the frontend's compression (#47) is tuned to. Deploy
+  setup is in `#6` (README "Deployment", Node pinned via `engines`, CI); no
+  `railway.json`, since Railway no longer accepts config files for new
+  services. Before the first deploy:
   - Store 245 has a **test** passcode (set 2026-10-13 for the end-to-end
     check). Set the real one with `npm run store:passcode -- 245` before
     staff use it, and give any other store its own (§4) — a store without
@@ -161,7 +163,6 @@ middleware (Supabase mocked). Still uncovered:
 
 - No request logging (e.g. morgan/pino) — nothing to look at when debugging
   a production issue beyond the `console.error` in the global error handler.
-- No CI pipeline (build/typecheck/test on push).
 - **The two repos' `frontend-contract.md` copies have drifted** (diffed
   2026-10-08). The frontend's copy is missing the `/api/ocr/reconcile`
   section, `DraftHeader.printout_datetime`, the full `totals` comparison

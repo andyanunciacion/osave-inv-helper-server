@@ -18,7 +18,7 @@ npm run store:passcode -- <store_code> [name]   # create a store / set its staff
 
 No lint tooling is configured yet. Tests live in `test/` (outside `src/`, so `tsc` doesn't compile them). `test/receipt-parser.test.ts` scores the parser field-by-field against hand-transcribed ground truth (`test/fixtures/receipts.expected.ts`) for real receipt photos, using Vision word geometry saved once to `test/fixtures/vision/*.json` — no Vision calls at test time. Its thresholds are a ratchet: tighten them when the parser improves, never loosen them to get a change through. To add a photo: `npx tsx scripts/capture-vision-fixtures.ts <image-dir> test/fixtures/vision` (one billed Vision call per new image), then transcribe it into `receipts.expected.ts` — the self-check there (row arithmetic + printed footer totals) catches transcription slips.
 
-Environment: copy `.env.example` to `.env` and set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (from a Supabase project). `PORT` defaults to 4000.
+Environment: copy `.env.example` to `.env` and set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (from a Supabase project). `PORT` defaults to 4000. Production runs on Railway (one always-on instance) — see README "Deployment" for its env vars; a new env var goes in `.env.example` and that table.
 
 Database schema: `supabase/schema.sql` is not wired into any migration tooling — run it manually against a Supabase project's SQL editor (or `psql`) to create/update tables. There's no Supabase CLI project linked yet.
 
