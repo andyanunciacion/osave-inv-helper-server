@@ -1,11 +1,12 @@
 import { Router } from "express";
+import { selectAll } from "../lib/select-all.js";
 import { supabase } from "../lib/supabase.js";
 import { searchQuerySchema } from "../validators/delivery.js";
 
 export const searchRouter = Router();
 
 const DELIVERY_ITEM_COLUMNS =
-  "id, delivery_code, store_code, item_code, item_name, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
+  "id, delivery_code, store_code, item_code, item_name, unit_count, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
 
 const GROUPED_DEFAULT_LIMIT = 15;
 const UNIFIED_DEFAULT_LIMIT = 50;
@@ -26,6 +27,7 @@ type ItemRow = {
   delivery_code: string;
   item_code: string | null;
   item_name: string;
+  unit_count: number | null;
   quantity: number | null;
   unit: string | null;
   item_price: number | null;
@@ -33,12 +35,27 @@ type ItemRow = {
   created_at: string;
 };
 
+// Mirrors the frontend's compareByItemCode (features/deliveries/lib/sort.ts):
+// null item_code sorts first, then natural/numeric locale compare so
+// "SAN-2" sorts before "SAN-10".
 function byItemCode(a: { item_code: string | null }, b: { item_code: string | null }): number {
-  return (a.item_code ?? "").localeCompare(b.item_code ?? "");
+  if (a.item_code === null && b.item_code === null) return 0;
+  if (a.item_code === null) return -1;
+  if (b.item_code === null) return 1;
+  return a.item_code.localeCompare(b.item_code, undefined, { numeric: true, sensitivity: "base" });
 }
 
-function escapeForIlike(value: string): string {
-  return `"%${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}%"`;
+// `q` is a literal substring, so LIKE's own wildcards in it (`%`, `_`, and
+// the `\` escape) are escaped. PostgREST also turns `*` into `%` and has no
+// escape for it, so a `*` in `q` still matches anything.
+function containsPattern(value: string): string {
+  return `%${value.replace(/[\\%_]/g, "\\$&")}%`;
+}
+
+// For a value inside PostgREST's .or() syntax, which needs double quotes
+// (and `\`/`"` escaped within them) once the value holds `,` `.` `(` `)`.
+function quoteForOr(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 searchRouter.get("/", async (req, res) => {
@@ -72,11 +89,16 @@ searchRouter.get("/", async (req, res) => {
       return res.json({ mode: "unified", items: [], pagination: { page, limit, total: 0 } });
     }
 
-    const { data: items, error: itemsError } = await supabase
-      .from("delivery_items")
-      .select(DELIVERY_ITEM_COLUMNS)
-      .eq("store_code", store_code)
-      .in("delivery_code", codes);
+    // Two full deliveries (~600 items each) already pass PostgREST's row cap.
+    const { data: items, error: itemsError } = await selectAll((from, to) =>
+      supabase
+        .from("delivery_items")
+        .select(DELIVERY_ITEM_COLUMNS)
+        .eq("store_code", store_code)
+        .in("delivery_code", codes)
+        .order("id")
+        .range(from, to),
+    );
 
     if (itemsError) {
       return res.status(500).json({ error: "internal_error", message: itemsError.message });
@@ -97,88 +119,81 @@ searchRouter.get("/", async (req, res) => {
   }
 
   const limit = parsed.data.limit ?? GROUPED_DEFAULT_LIMIT;
+  const normalizedQuery = q.toLowerCase();
 
-  // Free-text mode: check for an exact delivery_code match first (auto-expands).
-  let exactQuery = supabase
-    .from("deliveries")
-    .select("*")
-    .eq("store_code", store_code)
-    .ilike("delivery_code", q);
-  if (date) exactQuery = exactQuery.eq("delivery_date", date);
-  if (dateFrom) exactQuery = exactQuery.gte("delivery_date", dateFrom);
-  if (dateTo) exactQuery = exactQuery.lte("delivery_date", dateTo);
+  // Free-text mode. Matches the real frontend hook (use-delivery-search.ts),
+  // not the (admittedly stale, per frontend-contract.md's own warning) "only
+  // matched items" description for a delivery-code hit: any match on
+  // delivery_code — fragment or exact — shows every item in that delivery;
+  // only an exact match additionally auto-expands it. An item_code/item_name
+  // match on a delivery whose code didn't match shows just the matched rows.
+  const pattern = containsPattern(q);
+  const quoted = quoteForOr(pattern);
 
-  const { data: exactDelivery, error: exactError } = await exactQuery.maybeSingle();
-  if (exactError) {
-    return res.status(500).json({ error: "internal_error", message: exactError.message });
-  }
-
-  if (exactDelivery) {
-    const { data: items, error: itemsError } = await supabase
+  // Paged: a broad query ("a") matches most of the store's items, and the
+  // grouping below needs all of them.
+  const { data: matchedItems, error: matchedItemsError } = await selectAll((from, to) =>
+    supabase
       .from("delivery_items")
       .select(DELIVERY_ITEM_COLUMNS)
-      .eq("delivery_code", exactDelivery.delivery_code)
-      .order("item_code");
-
-    if (itemsError) {
-      return res.status(500).json({ error: "internal_error", message: itemsError.message });
-    }
-
-    return res.json({
-      mode: "grouped",
-      groups: [
-        {
-          delivery: exactDelivery as Delivery,
-          items: items ?? [],
-          displayItems: items ?? [],
-          autoExpand: true,
-        },
-      ],
-      pagination: { page: 1, limit, total: 1 },
-    });
-  }
-
-  // Broad match: item_code/item_name matches, plus delivery_code fragment matches.
-  const escaped = escapeForIlike(q);
-
-  const { data: matchedItems, error: matchedItemsError } = await supabase
-    .from("delivery_items")
-    .select(DELIVERY_ITEM_COLUMNS)
-    .eq("store_code", store_code)
-    .or(`item_code.ilike.${escaped},item_name.ilike.${escaped}`);
+      .eq("store_code", store_code)
+      .or(`item_code.ilike.${quoted},item_name.ilike.${quoted}`)
+      .order("id")
+      .range(from, to),
+  );
 
   if (matchedItemsError) {
     return res.status(500).json({ error: "internal_error", message: matchedItemsError.message });
   }
 
-  let codeFragmentQuery = supabase
+  let codeMatchQuery = supabase
     .from("deliveries")
     .select("delivery_code")
     .eq("store_code", store_code)
-    .ilike("delivery_code", `%${q}%`);
-  if (date) codeFragmentQuery = codeFragmentQuery.eq("delivery_date", date);
-  if (dateFrom) codeFragmentQuery = codeFragmentQuery.gte("delivery_date", dateFrom);
-  if (dateTo) codeFragmentQuery = codeFragmentQuery.lte("delivery_date", dateTo);
+    .ilike("delivery_code", pattern);
+  if (date) codeMatchQuery = codeMatchQuery.eq("delivery_date", date);
+  if (dateFrom) codeMatchQuery = codeMatchQuery.gte("delivery_date", dateFrom);
+  if (dateTo) codeMatchQuery = codeMatchQuery.lte("delivery_date", dateTo);
 
-  const { data: codeFragmentMatches, error: codeFragmentError } = await codeFragmentQuery;
-  if (codeFragmentError) {
-    return res.status(500).json({ error: "internal_error", message: codeFragmentError.message });
+  const { data: codeMatches, error: codeMatchError } = await codeMatchQuery;
+  if (codeMatchError) {
+    return res.status(500).json({ error: "internal_error", message: codeMatchError.message });
   }
 
-  const itemsByDelivery = new Map<string, ItemRow[]>();
+  const itemMatchesByDelivery = new Map<string, ItemRow[]>();
   for (const item of (matchedItems ?? []) as ItemRow[]) {
-    const list = itemsByDelivery.get(item.delivery_code) ?? [];
+    const list = itemMatchesByDelivery.get(item.delivery_code) ?? [];
     list.push(item);
-    itemsByDelivery.set(item.delivery_code, list);
+    itemMatchesByDelivery.set(item.delivery_code, list);
   }
 
-  const allCodes = new Set<string>([
-    ...itemsByDelivery.keys(),
-    ...(codeFragmentMatches ?? []).map((d) => d.delivery_code),
-  ]);
+  const codeMatchedCodes = new Set((codeMatches ?? []).map((d) => d.delivery_code));
+  const allCodes = new Set<string>([...itemMatchesByDelivery.keys(), ...codeMatchedCodes]);
 
   if (allCodes.size === 0) {
     return res.json({ mode: "grouped", groups: [], pagination: { page, limit, total: 0 } });
+  }
+
+  const fullItemsByDelivery = new Map<string, ItemRow[]>();
+  if (codeMatchedCodes.size > 0) {
+    const { data: fullItems, error: fullItemsError } = await selectAll((from, to) =>
+      supabase
+        .from("delivery_items")
+        .select(DELIVERY_ITEM_COLUMNS)
+        .in("delivery_code", Array.from(codeMatchedCodes))
+        .order("id")
+        .range(from, to),
+    );
+
+    if (fullItemsError) {
+      return res.status(500).json({ error: "internal_error", message: fullItemsError.message });
+    }
+
+    for (const item of (fullItems ?? []) as ItemRow[]) {
+      const list = fullItemsByDelivery.get(item.delivery_code) ?? [];
+      list.push(item);
+      fullItemsByDelivery.set(item.delivery_code, list);
+    }
   }
 
   let deliveriesQuery = supabase.from("deliveries").select("*").in("delivery_code", Array.from(allCodes));
@@ -193,12 +208,17 @@ searchRouter.get("/", async (req, res) => {
 
   const groups = ((deliveries ?? []) as Delivery[])
     .map((delivery) => {
-      const displayItems = (itemsByDelivery.get(delivery.delivery_code) ?? []).sort(byItemCode);
+      const isCodeMatch = codeMatchedCodes.has(delivery.delivery_code);
+      const displayItems = (
+        isCodeMatch
+          ? (fullItemsByDelivery.get(delivery.delivery_code) ?? [])
+          : (itemMatchesByDelivery.get(delivery.delivery_code) ?? [])
+      ).sort(byItemCode);
       return {
         delivery,
         items: displayItems,
         displayItems,
-        autoExpand: false,
+        autoExpand: isCodeMatch && delivery.delivery_code.toLowerCase() === normalizedQuery,
       };
     })
     .sort((a, b) => (a.delivery.delivery_date < b.delivery.delivery_date ? 1 : -1));

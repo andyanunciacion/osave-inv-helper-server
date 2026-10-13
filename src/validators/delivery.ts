@@ -4,6 +4,7 @@ import { normalizeStoreCode } from "../lib/normalize.js";
 export const deliveryItemSchema = z.object({
   item_code: z.string().trim().min(1).nullish(),
   item_name: z.string().trim().min(1),
+  unit_count: z.number().nonnegative().nullish(),
   quantity: z.number().nonnegative().nullish(),
   unit: z.enum(["BOX", "PIECE"]).nullish(),
   item_price: z.number().nonnegative().nullish(),
@@ -17,13 +18,43 @@ export const createDeliverySchema = z.object({
   delivery_date: z.string().refine((v) => !Number.isNaN(Date.parse(v)), {
     message: "delivery_date must be a valid date",
   }),
-  receipt_store_code: z.string().trim().nullish(),
+  receipt_store_code: z.string().trim().min(1).transform(normalizeStoreCode),
   uploaded_by: z.string().trim().nullish(),
   items: z.array(deliveryItemSchema).min(1),
 });
 
 export type CreateDeliveryInput = z.infer<typeof createDeliverySchema>;
 export type DeliveryItemInput = z.infer<typeof deliveryItemSchema>;
+
+export const updateDeliveryItemQuantitySchema = z.object({
+  quantity: z.number().nonnegative(),
+  reason: z.string().trim().min(1).nullish(),
+});
+
+export type UpdateDeliveryItemQuantityInput = z.infer<typeof updateDeliveryItemQuantitySchema>;
+
+// The frontend caps the input at the same length (DELIVERY_NOTE_MAX_LENGTH).
+const DELIVERY_NOTE_MAX_LENGTH = 500;
+
+export const updateDeliveryNoteSchema = z.object({
+  store_code: z.string().trim().min(1).transform(normalizeStoreCode),
+  // Blank after trimming clears the note, same as sending null.
+  note: z
+    .string()
+    .trim()
+    .max(DELIVERY_NOTE_MAX_LENGTH)
+    .nullable()
+    .transform((v) => v || null),
+});
+
+export type UpdateDeliveryNoteInput = z.infer<typeof updateDeliveryNoteSchema>;
+
+export const deliveryItemParamsSchema = z.object({
+  delivery_code: z.string(),
+  // z.guid(), not z.uuid(): any 8-4-4-4-12 hex string, as Postgres accepts,
+  // without zod's RFC version/variant checks.
+  item_id: z.guid(),
+});
 
 export const searchQuerySchema = z
   .object({
