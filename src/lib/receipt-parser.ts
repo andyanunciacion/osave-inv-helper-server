@@ -534,10 +534,26 @@ function heightAtX(f: Fragment, x: number, fallbackSlope: number): number {
 // Merges fragments that sit on the same line, closest first. Only used within
 // one side of the table (all-left or all-right), where fragments are close
 // enough that a shared slope is accurate.
-function mergeCollinear(input: Fragment[], medH: number): Fragment[] {
+function mergeCollinear(input: Fragment[], medH: number, curve: Curve): Fragment[] {
   let fragments = input;
   const fallback = medianSlope(fragments);
   const heightAt = (f: Fragment, slope: number): number => (f.sumY - slope * f.sumX) / f.tokens.length;
+
+  // Fragments side by side (a struck-through Qty leaves Unit/Box + UOM apart
+  // from Price + Total) are compared across the gap between their facing
+  // words, following the header line's rise over that same stretch. A
+  // fragment's own slope only holds over its own span: where the page curls
+  // at one edge, the Price-to-Total slope is several times the slope further
+  // left, and carrying it across to the UOM column lands a whole row off.
+  // The facing words' own angles are no substitute — on a lone "40" or "1"
+  // they're off by a few degrees, which is a row over a wide gap.
+  const gapDy = (fa: Fragment, fb: Fragment): number | null => {
+    const [l, r] = fragmentX(fa) <= fragmentX(fb) ? [fa, fb] : [fb, fa];
+    const lEnd = l.tokens.reduce((m, t) => (t.x1 > m.x1 ? t : m));
+    const rStart = r.tokens.reduce((m, t) => (t.x0 < m.x0 ? t : m));
+    if (rStart.x0 < lEnd.x1) return null;
+    return Math.abs(rStart.cy - (lEnd.cy + curve(rStart.cx) - curve(lEnd.cx)));
+  };
 
   for (;;) {
     let best: { a: number; b: number; dy: number } | null = null;
@@ -545,7 +561,7 @@ function mergeCollinear(input: Fragment[], medH: number): Fragment[] {
       for (let b = a + 1; b < fragments.length; b++) {
         const slopes = [fragments[a].slope, fragments[b].slope].filter((s): s is number => s !== null);
         const slope = slopes.length ? slopes.reduce((s, v) => s + v, 0) / slopes.length : fallback;
-        const dy = Math.abs(heightAt(fragments[a], slope) - heightAt(fragments[b], slope));
+        const dy = gapDy(fragments[a], fragments[b]) ?? Math.abs(heightAt(fragments[a], slope) - heightAt(fragments[b], slope));
         if (dy <= medH && (!best || dy < best.dy)) best = { a, b, dy };
       }
     }
@@ -646,8 +662,8 @@ function groupIntoRows(tokens: Word[], medH: number, numericStart: number, curve
   const fragments = [...byRoot.values()].map(makeFragment);
 
   const whole = fragments.filter((f) => f.tokens.some((t) => t.cx < numericStart) && f.tokens.some((t) => t.cx >= numericStart));
-  const leftOnly = mergeCollinear(fragments.filter((f) => f.tokens.every((t) => t.cx < numericStart)), medH);
-  const rightOnly = mergeCollinear(fragments.filter((f) => f.tokens.every((t) => t.cx >= numericStart)), medH);
+  const leftOnly = mergeCollinear(fragments.filter((f) => f.tokens.every((t) => t.cx < numericStart)), medH, curve);
+  const rightOnly = mergeCollinear(fragments.filter((f) => f.tokens.every((t) => t.cx >= numericStart)), medH, curve);
 
   const rows = whole.map((f) => f.tokens);
   if (leftOnly.length === 0 || rightOnly.length === 0) {
@@ -692,11 +708,17 @@ function findSanLabel(words: Word[], desc: Word | undefined): Word | undefined {
 // "- confirmed ok"). Vision reads handwriting at low confidence (~0.3-0.6 vs
 // 0.8+ for print) and the notes start with a dash, so the description ends at
 // the first dash whose tail is mostly low-confidence words.
+//
+// A note that starts with a tick or cross instead of a dash ("✗ for checking")
+// is caught by its size: handwriting runs about twice the height of the
+// printed description, so a low-confidence tail holding a word that much
+// taller than the printed words before it is a note too.
 function splitAnnotation(words: Word[]): { name: Word[]; annotated: boolean } {
   for (let i = 1; i < words.length; i++) {
-    if (!/^[-~–—]/.test(words[i].text)) continue;
     const tail = words.slice(i);
-    if (tail.reduce((s, w) => s + w.confidence, 0) / tail.length < 0.7) return { name: words.slice(0, i), annotated: true };
+    if (tail.reduce((s, w) => s + w.confidence, 0) / tail.length >= 0.7) continue;
+    const printedH = median(words.slice(0, i).map((w) => w.h));
+    if (/^[-~–—]/.test(words[i].text) || tail.some((w) => w.h > 1.6 * printedH)) return { name: words.slice(0, i), annotated: true };
   }
   return { name: words, annotated: false };
 }
