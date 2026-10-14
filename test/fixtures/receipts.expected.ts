@@ -35,6 +35,23 @@ export interface ExpectedPage {
 }
 
 export const EXPECTED: Record<string, ExpectedPage> = {
+  "08-12": {
+    header: { delivery_code: "ITPH2142119", warehouse_code: "BUN DC", delivery_date: "2026-10-12", receipt_store_code: "245", printout_datetime: "2026-10-12T13:19:11" },
+    footer: { total_pcs: null, total_box: 11, total_items: 11, total_value: 9173.0 },
+    items: [
+      ["3362", "Cookies Malt & Milk Pran 30g", 120, "BOX", 1, 3.75, 450.0],
+      ["3012", "Wafer Stick Choco Stik-O Jr 380g", 12, "BOX", 1, 88.0, 1056.0],
+      ["3656", "Filled Biscuit Mocha Circa 32g x10s", 20, "BOX", 1, 59.0, 1180.0],
+      ["3339", "Whatta Tops Assorted Cupcake 35g 10s", 12, "BOX", 1, 81.0, 972.0],
+      ["3160", "Potato Chips Spicy BBQ VCut 25g", 80, "BOX", 1, 16.0, 1280.0],
+      ["3057", "Potato Chip Sour Cream&Onion Piattos 40g", 80, "BOX", 1, 15.75, 1260.0],
+      ["3164", "Ribbed Cracklings Salt & Vinegar Oishi 24g", 100, "BOX", 1, 6.75, 675.0],
+      ["3580", "Potato Fries Cheese Flavor Snaffle 50g", 25, "BOX", 1, 13.0, 325.0],
+      ["3289", "Crunch Chocolate Puff Moby 25g", 100, "BOX", 1, 6.5, 650.0],
+      ["3163", "Baked Potato Flavor Crispy Patata Oishi 24g", 100, "BOX", 1, 6.75, 675.0],
+      ["3290", "Crunch Caramel Puff Moby 25g", 100, "BOX", 1, 6.5, 650.0],
+    ],
+  },
   "11(1)": {
     header: { delivery_code: "ITPH1966502", warehouse_code: "BUN DC", delivery_date: "2026-09-11", receipt_store_code: "245", printout_datetime: "2026-09-11T22:31:44" },
     footer: { total_pcs: 10, total_box: 123, total_items: 10, total_value: 82011.0 },
@@ -327,3 +344,8 @@ export const EXPECTED: Record<string, ExpectedPage> = {
     ],
   },
 };
+
+// The same three pages photographed again and sent over Messenger
+// (recompressed, shot at a different angle). The printed values are the same,
+// but Vision reads each photo differently, so each is scored on its own.
+for (const page of ["17", "17(1)", "17(2)"]) EXPECTED[`${page}-messenger`] = EXPECTED[page];
