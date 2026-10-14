@@ -18,6 +18,7 @@ type Delivery = {
   delivery_date: string;
   receipt_store_code: string | null;
   uploaded_by: string | null;
+  note: string | null;
   status: string;
   created_at: string;
 };
@@ -45,6 +46,16 @@ function byItemCode(a: { item_code: string | null }, b: { item_code: string | nu
   return a.item_code.localeCompare(b.item_code, undefined, { numeric: true, sensitivity: "base" });
 }
 
+function groupByDeliveryCode(items: ItemRow[]): Map<string, ItemRow[]> {
+  const byCode = new Map<string, ItemRow[]>();
+  for (const item of items) {
+    const list = byCode.get(item.delivery_code) ?? [];
+    list.push(item);
+    byCode.set(item.delivery_code, list);
+  }
+  return byCode;
+}
+
 // `q` is a literal substring, so LIKE's own wildcards in it (`%`, `_`, and
 // the `\` escape) are escaped. PostgREST also turns `*` into `%` and has no
 // escape for it, so a `*` in `q` still matches anything.
@@ -64,16 +75,16 @@ searchRouter.get("/", async (req, res) => {
     return res.status(400).json({ error: "invalid_query", issues: parsed.error.issues });
   }
 
-  const { store_code, q, date, dateFrom, dateTo, page } = parsed.data;
+  const { store_code, q, date, dateFrom, dateTo, view, page } = parsed.data;
 
-  // Date-only mode: unified flat list of items across every matching delivery.
+  // Date-only mode: every item across every matching delivery — as one
+  // unified flat list by default, or with `view=grouped` as one group per
+  // delivery (every item shown, none auto-expanded).
   if (!q) {
-    const limit = parsed.data.limit ?? UNIFIED_DEFAULT_LIMIT;
+    const grouped = view === "grouped";
+    const limit = parsed.data.limit ?? (grouped ? GROUPED_DEFAULT_LIMIT : UNIFIED_DEFAULT_LIMIT);
 
-    let deliveryQuery = supabase
-      .from("deliveries")
-      .select("delivery_code, delivery_date")
-      .eq("store_code", store_code);
+    let deliveryQuery = supabase.from("deliveries").select("*").eq("store_code", store_code);
     if (date) deliveryQuery = deliveryQuery.eq("delivery_date", date);
     if (dateFrom) deliveryQuery = deliveryQuery.gte("delivery_date", dateFrom);
     if (dateTo) deliveryQuery = deliveryQuery.lte("delivery_date", dateTo);
@@ -83,10 +94,15 @@ searchRouter.get("/", async (req, res) => {
       return res.status(500).json({ error: "internal_error", message: deliveriesError.message });
     }
 
-    const dateByCode = new Map((matchingDeliveries ?? []).map((d) => [d.delivery_code, d.delivery_date]));
+    const deliveriesInRange = (matchingDeliveries ?? []) as Delivery[];
+    const dateByCode = new Map(deliveriesInRange.map((d) => [d.delivery_code, d.delivery_date]));
     const codes = Array.from(dateByCode.keys());
     if (codes.length === 0) {
-      return res.json({ mode: "unified", items: [], pagination: { page, limit, total: 0 } });
+      return res.json(
+        grouped
+          ? { mode: "grouped", groups: [], pagination: { page, limit, total: 0 } }
+          : { mode: "unified", items: [], pagination: { page, limit, total: 0 } },
+      );
     }
 
     // Two full deliveries (~600 items each) already pass PostgREST's row cap.
@@ -102,6 +118,25 @@ searchRouter.get("/", async (req, res) => {
 
     if (itemsError) {
       return res.status(500).json({ error: "internal_error", message: itemsError.message });
+    }
+
+    if (grouped) {
+      const itemsByDelivery = groupByDeliveryCode((items ?? []) as ItemRow[]);
+      const groups = deliveriesInRange
+        .map((delivery) => {
+          const deliveryItems = (itemsByDelivery.get(delivery.delivery_code) ?? []).sort(byItemCode);
+          return { delivery, items: deliveryItems, displayItems: deliveryItems, autoExpand: false };
+        })
+        .sort((a, b) => {
+          if (a.delivery.delivery_date !== b.delivery.delivery_date) {
+            return a.delivery.delivery_date < b.delivery.delivery_date ? 1 : -1;
+          }
+          return a.delivery.delivery_code.localeCompare(b.delivery.delivery_code, undefined, { numeric: true });
+        });
+
+      const total = groups.length;
+      const from = (page - 1) * limit;
+      return res.json({ mode: "grouped", groups: groups.slice(from, from + limit), pagination: { page, limit, total } });
     }
 
     const unifiedItems = ((items ?? []) as ItemRow[])
@@ -160,12 +195,7 @@ searchRouter.get("/", async (req, res) => {
     return res.status(500).json({ error: "internal_error", message: codeMatchError.message });
   }
 
-  const itemMatchesByDelivery = new Map<string, ItemRow[]>();
-  for (const item of (matchedItems ?? []) as ItemRow[]) {
-    const list = itemMatchesByDelivery.get(item.delivery_code) ?? [];
-    list.push(item);
-    itemMatchesByDelivery.set(item.delivery_code, list);
-  }
+  const itemMatchesByDelivery = groupByDeliveryCode((matchedItems ?? []) as ItemRow[]);
 
   const codeMatchedCodes = new Set((codeMatches ?? []).map((d) => d.delivery_code));
   const allCodes = new Set<string>([...itemMatchesByDelivery.keys(), ...codeMatchedCodes]);
@@ -174,7 +204,7 @@ searchRouter.get("/", async (req, res) => {
     return res.json({ mode: "grouped", groups: [], pagination: { page, limit, total: 0 } });
   }
 
-  const fullItemsByDelivery = new Map<string, ItemRow[]>();
+  let fullItemsByDelivery = new Map<string, ItemRow[]>();
   if (codeMatchedCodes.size > 0) {
     const { data: fullItems, error: fullItemsError } = await selectAll((from, to) =>
       supabase
@@ -189,11 +219,7 @@ searchRouter.get("/", async (req, res) => {
       return res.status(500).json({ error: "internal_error", message: fullItemsError.message });
     }
 
-    for (const item of (fullItems ?? []) as ItemRow[]) {
-      const list = fullItemsByDelivery.get(item.delivery_code) ?? [];
-      list.push(item);
-      fullItemsByDelivery.set(item.delivery_code, list);
-    }
+    fullItemsByDelivery = groupByDeliveryCode((fullItems ?? []) as ItemRow[]);
   }
 
   let deliveriesQuery = supabase.from("deliveries").select("*").in("delivery_code", Array.from(allCodes));
