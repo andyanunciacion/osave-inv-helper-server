@@ -221,23 +221,14 @@ interface DeliverySearchResultGroup extends DeliveryGroup {
 }
 ```
 
-**Hook:** `useUnifiedItemSearch({ storeCode, range })` →
-`{ items: UnifiedItemRow[] }` (`features/deliveries/hooks/use-unified-item-search.ts`)
-
-Used instead of `useDeliverySearch` specifically when the query text is
-empty and only a date range is set (§6: "date-only search is usually 'what
-came in that day'"). Returns a flat, ungrouped list of items across every
-delivery in range, each item still carrying its own `delivery_code` and
-(added) `delivery_date`, sorted by date desc then `item_code`. This is a
-materially different query shape from the grouped search above — a real
-API needs both, selected by the same "is there text?" branch the frontend
-uses, not just one endpoint with grouping as a client-side afterthought.
-
-```ts
-interface UnifiedItemRow extends DeliveryItem {
-  delivery_date: string;
-}
-```
+**Date-only search** (empty `query`, `range` set) goes through the same
+hook and returns the same group shape: one group per delivery in range,
+each with *every* item (`displayItems === items`, sorted by `item_code`),
+`autoExpand: false`, groups sorted by `delivery_date` desc then
+`delivery_code`. The frontend asks for this with `view=grouped` on
+`GET /api/search`; without it, a date-only request still returns the older
+flat `mode: "unified"` item list (kept for backward compatibility, unused by
+the frontend).
 
 ---
 

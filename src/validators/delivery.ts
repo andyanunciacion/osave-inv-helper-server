@@ -63,6 +63,9 @@ export const searchQuerySchema = z
     date: z.string().optional(),
     dateFrom: z.string().optional(),
     dateTo: z.string().optional(),
+    // Date-only searches only (a `q` search is always grouped): "grouped"
+    // returns one group per delivery instead of the flat "unified" item list.
+    view: z.enum(["unified", "grouped"]).default("unified"),
     page: z.coerce.number().int().min(1).default(1),
     limit: z.coerce.number().int().min(1).max(200).optional(),
   })
