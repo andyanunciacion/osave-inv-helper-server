@@ -8,7 +8,7 @@ import { applyItemHistory, parseReceipt, type ItemHistory, type ParsedReceipt } 
 import { authStoreCode } from "../lib/store-auth.js";
 import { supabase } from "../lib/supabase.js";
 import { detectReceiptPages } from "../lib/vision.js";
-import { ocrBodySchema, ocrReconcileBodySchema } from "../validators/ocr.js";
+import { ocrBodySchema, ocrReconcileBodySchema, type OcrReconcileBodyInput } from "../validators/ocr.js";
 
 export const ocrRouter = Router();
 
@@ -133,46 +133,75 @@ ocrRouter.post("/", perIpLimiter, upload.single("image"), validateOcrRequest, da
   res.json({ header, items, totals });
 });
 
+type DraftHeader = OcrReconcileBodyInput["pages"][number];
+
+// For each printout timestamp, the distinct non-blank values one header field
+// was read as across the pages printed at that moment.
+function valuesByPrintout(pages: DraftHeader[], read: (page: DraftHeader) => string): Map<string, Set<string>> {
+  const byPrintout = new Map<string, Set<string>>();
+  for (const page of pages) {
+    const value = read(page);
+    if (!page.printout_datetime || !value) continue;
+    const values = byPrintout.get(page.printout_datetime) ?? new Set<string>();
+    values.add(value);
+    byPrintout.set(page.printout_datetime, values);
+  }
+  return byPrintout;
+}
+
+// The value a page's siblings agree on, or "" when none of them read it or
+// they disagree.
+function siblingValue(page: DraftHeader, byPrintout: Map<string, Set<string>>): string {
+  const values = page.printout_datetime ? byPrintout.get(page.printout_datetime) : undefined;
+  return values?.size === 1 ? [...values][0] : "";
+}
+
+// Pages of one physical receipt print an identical "Date and hour of
+// printout" (main-file.md §5 rule 8), so when one page's "To:" store code,
+// Transaction Date or Inv. Tran. No. came back blank — under a folded corner,
+// a staple, a sticker, or cut off by the photo's tilt — a sibling page from
+// the same print run that *did* read cleanly is used to fill it in. Ambiguous
+// (no sibling shares the timestamp, or siblings disagree) is left blank: the
+// user fills it in by hand on the review screen rather than trusting a guess.
+//
+// A read value is never overwritten, even when siblings disagree with it. For
+// the delivery code that disagreement matters (a misread code saves as a
+// second, bogus delivery), but which page is wrong is for staff to decide:
+// the review screen compares each page's code against its siblings' and
+// blocks Confirm until they match or staff keep it (frontend-contract.md §6).
+export function reconcilePages(storeCode: string, pages: DraftHeader[]) {
+  const storeCodes = valuesByPrintout(pages, (page) => normalizeStoreCode(page.receipt_store_code));
+  const dates = valuesByPrintout(pages, (page) => page.delivery_date.trim());
+  const deliveryCodes = valuesByPrintout(pages, (page) => page.delivery_code.trim());
+
+  return pages.map((page) => {
+    const readStoreCode = normalizeStoreCode(page.receipt_store_code);
+    const receiptStoreCode = readStoreCode || siblingValue(page, storeCodes);
+    const readDate = page.delivery_date.trim();
+    const deliveryDate = readDate || siblingValue(page, dates);
+    const readDeliveryCode = page.delivery_code.trim();
+    const deliveryCode = readDeliveryCode || siblingValue(page, deliveryCodes);
+    return {
+      ...page,
+      delivery_code: deliveryCode,
+      delivery_code_inferred: !readDeliveryCode && deliveryCode !== "",
+      receipt_store_code: receiptStoreCode,
+      receipt_store_code_inferred: !readStoreCode && receiptStoreCode !== "",
+      store_mismatch: receiptStoreCode !== "" && receiptStoreCode !== storeCode,
+      delivery_date: deliveryDate,
+      delivery_date_inferred: !readDate && deliveryDate !== "",
+    };
+  });
+}
+
 // No Vision call here — it only cross-references header fields the client
 // already got back from earlier POST /api/ocr calls in the same multi-page
 // upload, so it isn't rate-limited like the endpoint above.
-//
-// Pages of one physical receipt print an identical "Date and hour of
-// printout" (main-file.md §5 rule 8), so when one page's "To:" store code
-// came back blank — the digits themselves were under a folded corner, a
-// staple, a sticker, whatever — a sibling page from the same print run that
-// *did* read cleanly is used to fill it in. Ambiguous (no sibling shares the
-// timestamp, or siblings disagree) is left blank, same as today: the user
-// fills it in by hand on the review screen rather than trusting a guess.
 ocrRouter.post("/reconcile", (req, res) => {
   const parsedBody = ocrReconcileBodySchema.safeParse(req.body ?? {});
   if (!parsedBody.success) {
     return res.status(400).json({ error: "invalid_body", issues: parsedBody.error.issues });
   }
   const { store_code, pages } = parsedBody.data;
-
-  const codesByTimestamp = new Map<string, Set<string>>();
-  for (const page of pages) {
-    if (!page.printout_datetime || !page.receipt_store_code) continue;
-    const codes = codesByTimestamp.get(page.printout_datetime) ?? new Set<string>();
-    codes.add(normalizeStoreCode(page.receipt_store_code));
-    codesByTimestamp.set(page.printout_datetime, codes);
-  }
-
-  const resolvedPages = pages.map((page) => {
-    if (page.receipt_store_code) {
-      const receiptStoreCode = normalizeStoreCode(page.receipt_store_code);
-      return { ...page, receipt_store_code: receiptStoreCode, receipt_store_code_inferred: false, store_mismatch: receiptStoreCode !== store_code };
-    }
-
-    const candidates = page.printout_datetime ? codesByTimestamp.get(page.printout_datetime) : undefined;
-    if (candidates && candidates.size === 1) {
-      const [receiptStoreCode] = candidates;
-      return { ...page, receipt_store_code: receiptStoreCode, receipt_store_code_inferred: true, store_mismatch: receiptStoreCode !== store_code };
-    }
-
-    return { ...page, receipt_store_code_inferred: false, store_mismatch: false };
-  });
-
-  res.json({ pages: resolvedPages });
+  res.json({ pages: reconcilePages(store_code, pages) });
 });

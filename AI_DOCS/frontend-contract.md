@@ -372,15 +372,31 @@ deliberately mocked or postponed:
     fields, `localId`/items not included). Order doesn't matter and isn't
     preserved specially; the response mirrors the input array 1:1 by index.
   - 200 → `{ pages: Array<DraftHeader & { receipt_store_code_inferred:
-    boolean; store_mismatch: boolean }> }`. For a page whose
-    `receipt_store_code` was already non-blank, that value passes through
-    unchanged (`receipt_store_code_inferred: false`). For a page where it was
-    `""`: if exactly one other page in the batch shares the same
-    `printout_datetime` *and* has a non-blank `receipt_store_code`, that code
-    is copied in and `receipt_store_code_inferred` is `true`; otherwise it
-    stays `""` and `receipt_store_code_inferred` is `false` — same as not
-    calling this endpoint at all, so it's always safe to call unconditionally
-    on a multi-page upload rather than checking first for blanks.
+    boolean; delivery_date_inferred: boolean; delivery_code_inferred:
+    boolean; store_mismatch: boolean }> }`.
+    `receipt_store_code`, `delivery_date` and `delivery_code` are each
+    reconciled the same way. A page whose value was already non-blank passes
+    it through (trimmed, `receipt_store_code` also normalized;
+    `*_inferred: false`). For a page where
+    it was `""`: if the other pages in the batch with the same
+    `printout_datetime` that read the field all read the same value, that
+    value is copied in and its `*_inferred` flag is `true`. Otherwise it
+    stays `""` and the flag is `false`, same as not calling this endpoint at
+    all. So it's always safe to call unconditionally on a multi-page upload
+    rather than checking first for blanks. An inferred `delivery_date` or
+    `delivery_code` should be marked on the review screen like an inferred
+    item cell. A page whose value was read is never changed, even if a
+    sibling read a different one.
+  - **Disagreeing delivery codes are the frontend's to catch.** Pages of one
+    print run share an Inv. Tran. No., so a page whose code differs from the
+    one its siblings (same `printout_datetime`) read is almost always a
+    misread — and saving it creates a second, bogus delivery that can't be
+    deleted. The server doesn't pick a winner (with two pages there's no
+    majority). The review screen compares the page's code *as edited*
+    against its siblings' — an already-confirmed sibling counting with the
+    code it was saved under — names the siblings' code with a one-tap "Use
+    …" fix, and blocks Confirm until the codes match or staff keep the
+    page's own code.
   - `store_mismatch` is `true` when that page's (possibly just-inferred)
     `receipt_store_code` is non-blank and doesn't equal `store_code` — the
     same check `/api/ocr` does inline, surfaced per-page here instead of a
