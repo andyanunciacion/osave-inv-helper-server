@@ -81,12 +81,6 @@ a sibling page) and `PIECE`-unit rows. Word-geometry parsing (not
 against the original sample pages: every parsed row lands in the right row,
 and each page's sum of totals equals its printed "Total Value". Still open:
 
-- **Reconcile doesn't cross-check `delivery_code`.** Pages from one print run
-  share an "Inv. Tran. No.". If one page misreads it (e.g. `ITPH1978G04`),
-  saving that page creates a second, bogus delivery instead of appending to
-  the real one. Siblings with the same `printout_datetime` and disagreeing
-  codes should be flagged. Siblings with a blank code could be filled. Both
-  options need a contract decision with the frontend.
 - **Printed totals partly missed** (frontend browser pass). For `17.jpg` only
   `total_value` came back; `total_box` and `total_items` were blank although
   "Total Box: 8 / Total Item/s: 8" is clearly printed. `parseTotals` reads
@@ -210,14 +204,17 @@ For anyone reading this later wondering why these *aren't* on the list:
 - Delivery note (`#19`, `frontend-contract.md` §9): `add_delivery_note` applied
   to the Supabase project 2026-10-12; the column and the PATCH's update query
   were checked against it (a non-matching code returns no row → 404). A real
-  save from the frontend hasn't been tried yet.
+  save from the frontend's upload result screen worked on 2026-10-15 (note
+  on ITPH1982020).
 - Multi-page upload (`#12`, merged): `/api/ocr/reconcile` cross-checks store
   codes across pages of one receipt via the printed printout timestamp
   (`main-file.md` §5 rule 8), and since `#31` fills a blank Transaction
-  Date the same way (`delivery_date_inferred`), both covered by
-  `test/ocr-reconcile.test.ts`. The frontend marks an inferred date with
-  the dashed outline (its `#65`, browser-checked 2026-10-15); release both
-  together. The parser reads the timestamp and
+  Date the same way (`delivery_date_inferred`), and since `#33` a blank
+  Inv. Tran. No. (`delivery_code_inferred`), all covered by
+  `test/ocr-reconcile.test.ts`. A read delivery code that disagrees with
+  its siblings is left as read; the frontend's review screen (its `#67`)
+  blocks Confirm on it until staff fix or keep it. Release `#33` with the
+  frontend's `#67`. The parser reads the timestamp and
   warehouse from the page footer first. Default `OCR_RATE_LIMIT_PER_MINUTE` raised to
   30 so a ~25-page delivery fits in one batch.
 - Crossed-out Qty/UOM recovery, handwriting flag and printed totals block

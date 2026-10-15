@@ -157,23 +157,34 @@ function siblingValue(page: DraftHeader, byPrintout: Map<string, Set<string>>): 
 }
 
 // Pages of one physical receipt print an identical "Date and hour of
-// printout" (main-file.md §5 rule 8), so when one page's "To:" store code or
-// Transaction Date came back blank — under a folded corner, a staple, a
-// sticker, or cut off by the photo's tilt — a sibling page from the same
-// print run that *did* read cleanly is used to fill it in. Ambiguous (no
-// sibling shares the timestamp, or siblings disagree) is left blank: the user
-// fills it in by hand on the review screen rather than trusting a guess.
+// printout" (main-file.md §5 rule 8), so when one page's "To:" store code,
+// Transaction Date or Inv. Tran. No. came back blank — under a folded corner,
+// a staple, a sticker, or cut off by the photo's tilt — a sibling page from
+// the same print run that *did* read cleanly is used to fill it in. Ambiguous
+// (no sibling shares the timestamp, or siblings disagree) is left blank: the
+// user fills it in by hand on the review screen rather than trusting a guess.
+//
+// A read value is never overwritten, even when siblings disagree with it. For
+// the delivery code that disagreement matters (a misread code saves as a
+// second, bogus delivery), but which page is wrong is for staff to decide:
+// the review screen compares each page's code against its siblings' and
+// blocks Confirm until they match or staff keep it (frontend-contract.md §6).
 export function reconcilePages(storeCode: string, pages: DraftHeader[]) {
   const storeCodes = valuesByPrintout(pages, (page) => normalizeStoreCode(page.receipt_store_code));
   const dates = valuesByPrintout(pages, (page) => page.delivery_date.trim());
+  const deliveryCodes = valuesByPrintout(pages, (page) => page.delivery_code.trim());
 
   return pages.map((page) => {
     const readStoreCode = normalizeStoreCode(page.receipt_store_code);
     const receiptStoreCode = readStoreCode || siblingValue(page, storeCodes);
     const readDate = page.delivery_date.trim();
     const deliveryDate = readDate || siblingValue(page, dates);
+    const readDeliveryCode = page.delivery_code.trim();
+    const deliveryCode = readDeliveryCode || siblingValue(page, deliveryCodes);
     return {
       ...page,
+      delivery_code: deliveryCode,
+      delivery_code_inferred: !readDeliveryCode && deliveryCode !== "",
       receipt_store_code: receiptStoreCode,
       receipt_store_code_inferred: !readStoreCode && receiptStoreCode !== "",
       store_mismatch: receiptStoreCode !== "" && receiptStoreCode !== storeCode,
