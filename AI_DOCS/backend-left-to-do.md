@@ -1,9 +1,9 @@
 # Backend — Left To Do
 
 Reference doc for what's still open on this server repo, last re-checked
-against the code on 2026-10-13 (branch `21-store-passcode-access` off
-`develop` at `9875c89`; `npm test` 40/40 passing, `tsc --noEmit` clean).
-Previous check: 2026-10-12.
+against the code on 2026-10-15 (`production` at `8c36493`, same code as
+`develop`; `npm test` 44/44 passing). Previous checks: 2026-10-14,
+2026-10-13.
 Companion to `main-file.md` (business rules/roadmap) and
 `frontend-contract.md` (response shapes) — this doc tracks *gaps*, not
 current behavior. Update it as items get resolved rather than letting it go
@@ -11,30 +11,35 @@ stale; delete a line once it's actually done instead of marking it "done"
 here (git history is the record of what shipped).
 
 The frontend keeps its own list in
-`osave-inv-helper-ui/AI_DOCS/frontend-left-to-do.md`. Its 2026-10-07
-end-to-end browser pass ran against this server; what it found for the
-backend is in §2 and §3 below.
+`osave-inv-helper-ui/AI_DOCS/frontend-left-to-do.md` (synced with this one
+2026-10-15). Its 2026-10-07 end-to-end browser pass ran against this
+server; what it found for the backend is in §2 and §3 below. Its "Backend"
+subsection mirrors the items here that touch the frontend, so update both
+together.
 
 ---
 
 ## 1. Release / deployment
 
-- **Nothing has been released yet.** `production` is still at the initial
-  configuration commit (`ffeea90`); every feature lives on `develop`.
-- **Host: Railway** (frontend on Vercel), starting on the free tiers. It has
-  to stay one always-on instance, not serverless: the OCR and passcode
-  limiters are in-memory, and a serverless body cap (~4.5MB) would undercut
-  the 10MB photo limit the frontend's compression (#47) is tuned to. Deploy
-  setup is in `#6` (README "Deployment", Node pinned via `engines`, CI); no
-  `railway.json`, since Railway no longer accepts config files for new
-  services. Before the first deploy:
-  - Store 245 has a **test** passcode (set 2026-10-13 for the end-to-end
+- **Released.** `develop` was first merged into `production` on 2026-10-13
+  (`#24`), then again with the parser fix `#25` (`#27`) and the grouped
+  date search `#28` (`#30`), both 2026-10-14. `production` has no code that
+  `develop` lacks; the two differ only by merge commits.
+- **Host: Railway** (frontend on Vercel), on the free tiers. It has to stay
+  one always-on instance, not serverless: the OCR and passcode limiters are
+  in-memory, and a serverless body cap (~4.5MB) would undercut the 10MB
+  photo limit the frontend's compression (#47) is tuned to. Setup is in
+  README "Deployment". The pre-launch checklist below can't be verified from
+  the repo. Confirm each item on Railway/Supabase, then delete it here:
+  - Store 245 had a **test** passcode (set 2026-10-13 for the end-to-end
     check). Set the real one with `npm run store:passcode -- 245` before
-    staff use it, and give any other store its own (§4) — a store without
+    staff use it, and give any other store its own (§4). A store without
     one is refused.
-  - Set `TRUST_PROXY=1` on Railway (`src/index.ts`). Leave it unset locally.
-  - Set `ALLOWED_ORIGINS` to the Vercel URL, and the Supabase/Google env vars.
-  - Check what Railway's free tier allows (credit, sleeping): a sleeping
+  - `TRUST_PROXY=1` on Railway (`src/index.ts`). Without it every caller
+    shares one IP, so one wrong-passcode streak locks out everyone.
+  - `ALLOWED_ORIGINS` set to the exact Vercel URL, plus the Supabase/Google
+    env vars.
+  - Check what Railway's free tier allows (credit, sleeping). A sleeping
     server makes the first upload after a break slow.
 - **OCR rate limiting is in-memory** (`src/routes/ocr.ts`): counters reset on
   restart and aren't shared across instances. Fine for a single instance;
@@ -76,15 +81,6 @@ a sibling page) and `PIECE`-unit rows. Word-geometry parsing (not
 against the original sample pages: every parsed row lands in the right row,
 and each page's sum of totals equals its printed "Total Value". Still open:
 
-- **Reconcile doesn't fill a blank Transaction date** (frontend browser pass
-  2026-10-07). On the `14*` batch, `/api/ocr/reconcile` filled pages 2/3's
-  store code from page 1 but left their `delivery_date` blank, so staff typed
-  it on every page. The parser misses the date when the "Transaction Date"
-  label is cut off or the photo is strongly tilted (14(1), 14(2) in the
-  fixtures). Fill it from siblings with the same `printout_datetime`, the
-  same way as the store code, and add a `delivery_date_inferred` flag
-  (contract change; the frontend already marks inferred cells with a dashed
-  outline).
 - **Reconcile doesn't cross-check `delivery_code`.** Pages from one print run
   share an "Inv. Tran. No.". If one page misreads it (e.g. `ITPH1978G04`),
   saving that page creates a second, bogus delivery instead of appending to
@@ -97,7 +93,10 @@ and each page's sum of totals equals its printed "Total Value". Still open:
   the bare number stack only when it holds exactly 3 numbers, or 2 on a page
   without PIECE rows, so a stack that Vision splits or partly drops is
   discarded. With only the value sum to compare, a wrong Qty passes the
-  frontend's totals check. The `17.json` fixture can reproduce it offline.
+  frontend's totals check. Still true as of 2026-10-14: `17.json`,
+  `17(2).json` and their `-messenger` re-photos come back with only
+  `total_value`. `17(1)` reads all three. Those fixtures reproduce it
+  offline.
 - **Still one warehouse template, one store.** Not yet tried on receipts
   from another store or another date, flat scans, or pages without the
   header band. Row grouping relies on the header labels (`SAN`,
@@ -138,38 +137,44 @@ still open:
   resets it, and it's per instance.
 - `uploaded_by` is saved as `null` on every delivery because the frontend
   never sends it (no reference in its `src/` outside types/tests; checked
-  2026-10-08). The server stores it correctly when present. This needs a real
+  2026-10-15). The server stores it correctly when present. This needs a real
   identity source first (see the frontend list's Auth item).
 
 ## 5. Testing
 
-Vitest is set up (`npm test`), covering `receipt-parser.ts` against 12 real
-photos (see CLAUDE.md), passcode hashing, and the `requireStoreAccess`
-middleware (Supabase mocked). Still uncovered:
+Vitest is set up (`npm test`, also run by CI on PRs and pushes to
+`develop`/`production`), covering `receipt-parser.ts` against the real
+photos in `test/fixtures/vision/` (see CLAUDE.md), passcode hashing, the
+`requireStoreAccess` middleware (Supabase mocked), and `/api/ocr/reconcile`'s
+sibling fill. Still uncovered:
 - Delivery duplicate-detection (`POST /api/deliveries`): the
   `create_delivery` function's append/reject paths, plus the `dedupe_key`
   generated-column behaviour for code-less items. These were checked once
   against PGlite (Postgres in WASM) on 2026-10-08 with a throwaway script.
-  Nothing in `npm test` covers them yet. `mergeDuplicateItems` is a pure function and the easiest
-  start, but it isn't exported yet.
-- Search grouping/sorting math (`GET /api/search`) — the grouped-vs-unified
-  branch, exact-vs-partial delivery-code match auto-expand logic, and
-  pagination slicing, since it's all done in application code rather than
-  SQL (see `CLAUDE.md`'s note on why).
-- `/api/ocr/reconcile` — sibling matching by printout timestamp, and the
-  ambiguous cases (no sibling, disagreeing siblings) staying blank.
+  Nothing in `npm test` covers them yet. `mergeDuplicateItems` is a pure
+  function and the easiest start, but it isn't exported yet. The frontend's
+  `upload/lib/repeated-items.ts` (its #63, which warns about repeated codes
+  before Confirm) copies its grouping key and the fields it compares, so a
+  change to either one needs the other.
+- Search grouping/sorting math (`GET /api/search`): the three branches
+  (text query, date-only `view=grouped` from `#28`, date-only unified),
+  exact-vs-partial delivery-code match auto-expand logic, and pagination
+  slicing. It's all done in application code rather than SQL (see
+  `CLAUDE.md`'s note on why).
 
 ## 6. Operational gaps
 
 - No request logging (e.g. morgan/pino) — nothing to look at when debugging
   a production issue beyond the `console.error` in the global error handler.
 - **The two repos' `frontend-contract.md` copies have drifted** (diffed
-  2026-10-08). The frontend's copy is missing the `/api/ocr/reconcile`
-  section, `DraftHeader.printout_datetime`, the full `totals` comparison
-  rules and all of §8 (quantity PATCH). This copy is missing the frontend's
-  newer §2 wording (merges keep `status: "success"`, shown on the batch
-  summary). Merge them into one text and copy it to both repos. §9 (delivery
-  note, 2026-10-12) was written to match in both copies.
+  2026-10-08). Since 2026-10-15 §6 (OCR, incl. `/api/ocr/reconcile` and
+  `delivery_date_inferred`) matches in both. Still different: the
+  frontend's copy is missing all of §8 (quantity PATCH); this copy is
+  missing the frontend's newer §2 wording (merges keep `status: "success"`,
+  shown on the batch summary), and its §8 still says the quantity PATCH has
+  "no frontend hook yet" (the frontend's #23 added one); §9 (delivery note)
+  is written from each side. Merge them into one text and copy it to both
+  repos.
 
 ## 7. Deleting a confirmed delivery or item
 
@@ -194,6 +199,10 @@ invalidate `["deliveries", storeCode]` on each event.
 ## Already handled (kept here only as context, not a to-do)
 
 For anyone reading this later wondering why these *aren't* on the list:
+- Deployment setup (`#6`): README "Deployment", Node pinned via `engines`,
+  CI (build + test). No `railway.json`, because Railway no longer accepts
+  config files for new services. The health check and restart policy are
+  dashboard settings.
 - Every migration in `supabase/migrations/` has been applied to the Supabase
   project, including `atomic_delivery_writes` (`#17`) — the
   `update_delivery_item_quantity` function answered a no-match call on
@@ -204,15 +213,20 @@ For anyone reading this later wondering why these *aren't* on the list:
   save from the frontend hasn't been tried yet.
 - Multi-page upload (`#12`, merged): `/api/ocr/reconcile` cross-checks store
   codes across pages of one receipt via the printed printout timestamp
-  (`main-file.md` §5 rule 8); the parser reads the timestamp and warehouse
-  from the page footer first. Default `OCR_RATE_LIMIT_PER_MINUTE` raised to
+  (`main-file.md` §5 rule 8), and since `#31` fills a blank Transaction
+  Date the same way (`delivery_date_inferred`), both covered by
+  `test/ocr-reconcile.test.ts`. The frontend marks an inferred date with
+  the dashed outline (its `#65`, browser-checked 2026-10-15); release both
+  together. The parser reads the timestamp and
+  warehouse from the page footer first. Default `OCR_RATE_LIMIT_PER_MINUTE` raised to
   30 so a ~25-page delivery fits in one batch.
 - Crossed-out Qty/UOM recovery, handwriting flag and printed totals block
   (`#15`, merged into `develop`): `reconcileItem` row arithmetic, item-history
   fill, and an `inferred` array on every item.
 - In-batch duplicate rows are merged (`mergedItems`); a collision with an
   already-saved row is rejected per row (`partial`). The frontend shows both
-  (its `#21`/`#42`), and both were verified live on 2026-10-07.
+  (its `#21`/`#42`), and both were verified live on 2026-10-07. Its `#63`
+  also warns about repeated codes on the review screen before Confirm.
 - Global JSON error handling (404s, multer upload errors, malformed JSON
   bodies) — all failure paths return JSON instead of Express's default HTML
   error page.
