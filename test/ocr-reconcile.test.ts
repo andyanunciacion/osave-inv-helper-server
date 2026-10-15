@@ -1,5 +1,6 @@
 // POST /api/ocr/reconcile's cross-check of sibling pages from one print run
-// (main-file.md §5 rule 8): a blank store code or Transaction Date is filled
+// (main-file.md §5 rule 8): a blank store code, Transaction Date or delivery
+// code is filled
 // from pages sharing the printout timestamp, and left blank when ambiguous.
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -65,6 +66,23 @@ describe("reconcilePages", () => {
     const [a, b] = reconcilePages("245", [page({ delivery_date: "" }), page({ delivery_date: " " })]);
     expect(a).toMatchObject({ delivery_date: "", delivery_date_inferred: false });
     expect(b).toMatchObject({ delivery_date: "", delivery_date_inferred: false });
+  });
+
+  it("fills a blank delivery code from siblings that agree", () => {
+    const [read, blank] = reconcilePages("245", [page(), page({ delivery_code: "" })]);
+    expect(read).toMatchObject({ delivery_code: "ITPH1", delivery_code_inferred: false });
+    expect(blank).toMatchObject({ delivery_code: "ITPH1", delivery_code_inferred: true });
+  });
+
+  it("leaves read delivery codes alone when siblings disagree, and a blank one blank", () => {
+    const [a, misread, blank] = reconcilePages("245", [
+      page(),
+      page({ delivery_code: "ITPH1G" }),
+      page({ delivery_code: " " }),
+    ]);
+    expect(a).toMatchObject({ delivery_code: "ITPH1", delivery_code_inferred: false });
+    expect(misread).toMatchObject({ delivery_code: "ITPH1G", delivery_code_inferred: false });
+    expect(blank).toMatchObject({ delivery_code: "", delivery_code_inferred: false });
   });
 
   it("flags a mismatched store code, read or inferred", () => {
