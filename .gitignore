@@ -5,3 +5,5 @@ dist
 *.log
 sample-files/
 .env.backup
+# Store sign-in QR codes (scripts/set-store-passcode.ts) — they hold the passcode.
+store-qr/

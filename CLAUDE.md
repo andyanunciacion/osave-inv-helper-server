@@ -13,7 +13,7 @@ npm run dev      # tsx watch src/index.ts — dev server with reload
 npm run build    # tsc — compiles src/ to dist/
 npm start        # node dist/index.js — run the compiled build
 npm test         # vitest run — receipt-parser accuracy against real receipt photos
-npm run store:passcode -- <store_code> [name]   # create a store / set its staff passcode (prompts for it)
+npm run store:passcode -- <store_code> [name]   # create a store / set its staff passcode (prompts for it), saves its sign-in QR to store-qr/
 ```
 
 No lint tooling is configured yet. Tests live in `test/` (outside `src/`, so `tsc` doesn't compile them). `test/receipt-parser.test.ts` scores the parser field-by-field against hand-transcribed ground truth (`test/fixtures/receipts.expected.ts`) for real receipt photos, using Vision word geometry saved once to `test/fixtures/vision/*.json` — no Vision calls at test time. Its thresholds are a ratchet: tighten them when the parser improves, never loosen them to get a change through. To add a photo: `npx tsx scripts/capture-vision-fixtures.ts <image-dir> test/fixtures/vision` (one billed Vision call per new image), then transcribe it into `receipts.expected.ts` — the self-check there (row arithmetic + printed footer totals) catches transcription slips.

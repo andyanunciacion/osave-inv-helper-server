@@ -14,7 +14,7 @@ npm install
 cp .env.example .env     # fill in Supabase + Google credentials
 npm run dev              # http://localhost:4000, GET /health → {"status":"ok"}
 npm test
-npm run store:passcode -- <store_code> [name]   # create a store / set its passcode
+npm run store:passcode -- <store_code> [name]   # create a store / set its passcode (+ sign-in QR in store-qr/)
 ```
 
 ## Deployment

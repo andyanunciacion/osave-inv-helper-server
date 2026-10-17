@@ -7,9 +7,16 @@
 //
 // The passcode is typed at a prompt, not passed as an argument, so it doesn't
 // end up in shell history. It's shown as you type it.
+//
+// Once saved, it prints the store's sign-in QR code and saves it as
+// store-qr/<store_code>.png (git-ignored) — scanning it in the app signs a
+// phone in with no typing (AI_DOCS/frontend-contract.md §10). Changing the
+// passcode makes the old QR code stop working.
 
 import "dotenv/config";
+import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
+import QRCode from "qrcode";
 import { normalizeStoreCode } from "../src/lib/normalize.js";
 import { hashPasscode, passcodeProblem } from "../src/lib/passcode.js";
 import { supabase } from "../src/lib/supabase.js";
@@ -57,3 +64,11 @@ if (writeError) {
 }
 
 console.log(`${existing ? "Updated" : "Created"} store ${storeCode} (${name}) with the new passcode.`);
+
+// The QR payload the app's scanner reads (frontend-contract.md §10).
+const qrText = JSON.stringify({ store_code: storeCode, passcode });
+const qrPath = `store-qr/${storeCode.replace(/[^A-Z0-9_-]/g, "_")}.png`;
+await mkdir("store-qr", { recursive: true });
+await QRCode.toFile(qrPath, qrText, { width: 600 });
+console.log(await QRCode.toString(qrText, { type: "terminal", small: true }));
+console.log(`Sign-in QR code saved to ${qrPath}. Anyone who scans it can use store ${storeCode} — keep it where only staff can see it.`);
