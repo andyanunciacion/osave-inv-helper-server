@@ -607,5 +607,23 @@ accepted, so it's how the store screen checks a passcode before saving it.
   to re-enter it — e.g. after the manager changes it.
 - The store screen (`StoreCodeForm`, `useStoreSignIn`) checks a code +
   passcode with `GET /api/stores/current` before saving them; the passcode can
-  be left blank when this phone already has it for that code. A QR scan
-  (`QrScanView`) fills in only the store code, then asks for the passcode.
+  be left blank when this phone already has it for that code.
+- A scanned store QR code (`QrScanView`, `useQrSignIn`) signs in the same
+  way and goes straight to `/search`. If it's refused, the store code is
+  kept and the store screen shows why and asks for the passcode. An older
+  QR code with only the store code goes to the store screen for the passcode.
+
+**Store sign-in QR code** (added 2026-10-17, backend branch
+`38-qr-code-fills-up-both-store-code-and-passcode`, UI branch
+`53-qr-code-fills-up-both-store-code-and-passcode`). The QR code holds JSON
+text:
+
+```
+{"store_code":"245","passcode":"<passcode>"}
+```
+
+`npm run store:passcode` prints it and saves it as `store-qr/<store_code>.png`
+(git-ignored) every time it sets a passcode, so changing the passcode makes
+the old QR code stop working. Anyone who scans it can sign in to that store,
+just as if they knew the passcode. The app still reads plain text that isn't
+JSON as a store code alone.
