@@ -3,6 +3,7 @@ import cors from "cors";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
 import multer from "multer";
+import { log, requestLogger } from "./lib/request-log.js";
 import { passcodeAttemptLimiter, requireStoreAccess } from "./lib/store-auth.js";
 import { storesRouter } from "./routes/stores.js";
 import { deliveriesRouter } from "./routes/deliveries.js";
@@ -21,6 +22,10 @@ const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY ?? "", 10);
 if (Number.isFinite(trustProxyHops) && trustProxyHops > 0) {
   app.set("trust proxy", trustProxyHops);
 }
+
+// First, so every request is logged — including ones CORS, the passcode
+// check or the rate limiters turn away.
+app.use(requestLogger);
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:3000")
   .split(",")
@@ -52,7 +57,7 @@ app.use((_req, res) => {
 // happen before a route handler runs — a multer upload error (e.g. the
 // /api/ocr file-size limit) or a malformed JSON body — which would otherwise
 // fall through to Express's default HTML error page.
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
       return res.status(413).json({ error: "file_too_large", message: "Image must be 10MB or smaller" });
@@ -62,10 +67,16 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof SyntaxError && "status" in err && (err as { status?: number }).status === 400 && "body" in err) {
     return res.status(400).json({ error: "invalid_json", message: "Request body must be valid JSON" });
   }
-  console.error(err);
+  // The stack goes in one field so it stays one log entry, not one per line.
+  log("error", "unhandled error", {
+    method: req.method,
+    path: req.originalUrl,
+    error_message: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   res.status(500).json({ error: "internal_error", message: "Unexpected server error" });
 });
 
 app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
+  log("info", `Server listening on port ${port}`);
 });
