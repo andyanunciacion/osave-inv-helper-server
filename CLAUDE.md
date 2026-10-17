@@ -13,7 +13,7 @@ npm run dev      # tsx watch src/index.ts — dev server with reload
 npm run build    # tsc — compiles src/ to dist/
 npm start        # node dist/index.js — run the compiled build
 npm test         # vitest run — receipt-parser accuracy against real receipt photos
-npm run store:passcode -- <store_code> [name]   # create a store / set its staff passcode (prompts for it)
+npm run store:passcode -- <store_code> [name]   # create a store / set its staff passcode (prompts for it), saves its sign-in QR to store-qr/
 ```
 
 No lint tooling is configured yet. Tests live in `test/` (outside `src/`, so `tsc` doesn't compile them). `test/receipt-parser.test.ts` scores the parser field-by-field against hand-transcribed ground truth (`test/fixtures/receipts.expected.ts`) for real receipt photos, using Vision word geometry saved once to `test/fixtures/vision/*.json` — no Vision calls at test time. Its thresholds are a ratchet: tighten them when the parser improves, never loosen them to get a change through. To add a photo: `npx tsx scripts/capture-vision-fixtures.ts <image-dir> test/fixtures/vision` (one billed Vision call per new image), then transcribe it into `receipts.expected.ts` — the self-check there (row arithmetic + printed footer totals) catches transcription slips.
@@ -32,6 +32,8 @@ Database schema: `supabase/schema.sql` is not wired into any migration tooling �
 ## Architecture
 
 `src/index.ts` is the only entry point: it mounts four routers under `/api` (`stores`, `deliveries`, `search`, `ocr`) plus an open `/health` check.
+
+**Logging** (`src/lib/request-log.ts`): `requestLogger` is mounted first and writes one JSON line per request to stdout (method, path, status, duration, signed-in or attempted store, IP, and the response body's `error`/`message`/`status`). Railway turns each field into a filter. Server-side logging goes through `log(level, message, fields)`, not bare `console.log`, so every entry stays one parseable line. Never log request headers or bodies: the passcode is a header, and receipts are store data.
 
 **Every `/api` request is signed in to one store** (`src/lib/store-auth.ts`, `frontend-contract.md` §10): `requireStoreAccess` checks the `X-Store-Code` / `X-Store-Passcode` headers against `stores.passcode_hash` (scrypt, `src/lib/passcode.ts`), refuses a `store_code` in the query or JSON body that isn't that store (403), and leaves the store in `authStoreCode(res)`. Wrong passcodes are rate-limited per IP (`passcodeAttemptLimiter`). Stores and their passcodes are created with `scripts/set-store-passcode.ts`, not over the API; a store with no passcode can't be used. `TRUST_PROXY` (hops) makes `req.ip` the real caller behind the host's proxy — the per-IP limiters depend on it, and it's off by default because trusting a proxy that isn't there lets callers fake their IP. Each route file in `src/routes/` talks directly to Supabase via the client in `src/lib/supabase.ts` (service-role key — this server is trusted, not RLS-scoped) — there's no repository/service layer in between.
 
