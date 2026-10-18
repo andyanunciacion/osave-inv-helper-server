@@ -41,7 +41,9 @@ create table if not exists delivery_items (
   quantity numeric,                    -- "Qty" (how many units of `unit` were delivered)
   unit text,                           -- "UOM" ("BOX" or "PIECE")
   item_price numeric,                  -- "Sales Price"
-  total_item_price numeric,            -- "Total" — extracted as printed, not recomputed
+  total_item_price numeric,            -- "Total" — extracted as printed; recalculated
+                                        -- only by a quantity correction
+                                        -- (update_delivery_item_quantity)
   raw_ocr_text text,
   created_at timestamptz default now(),
   -- item_code stays null when the receipt has no code (matches the frontend's
@@ -61,7 +63,8 @@ create index if not exists deliveries_store_date_idx on deliveries (store_code, 
 -- One row per quantity correction made to a confirmed delivery_items row
 -- (main-file.md §12's "edit log" suggestion). Item edits are intentionally
 -- narrow (quantity only, see CLAUDE.md) so this table only ever tracks a
--- before/after quantity pair, not a generic field-diff.
+-- before/after quantity pair — plus the total it recalculates — not a
+-- generic field-diff.
 create table if not exists delivery_item_updates (
   id uuid primary key default gen_random_uuid(),
   item_id uuid not null references delivery_items(id),
@@ -69,6 +72,8 @@ create table if not exists delivery_item_updates (
   store_code text not null references stores(store_code),  -- denormalized, matches delivery_items
   previous_quantity numeric,
   new_quantity numeric not null,
+  previous_total_item_price numeric,   -- null on rows from before the total was
+  new_total_item_price numeric,        -- recalculated (20261018000000 migration)
   reason text,
   created_at timestamptz default now()
 );
@@ -86,7 +91,9 @@ alter table delivery_items enable row level security;
 alter table delivery_item_updates enable row level security;
 
 -- The transactional writes behind POST /api/deliveries and the quantity
--- PATCH (added by migrations/20261008000000_atomic_delivery_writes.sql).
+-- PATCH (added by migrations/20261008000000_atomic_delivery_writes.sql; the
+-- quantity PATCH's total recalculation by
+-- migrations/20261018000000_recalculate_total_on_quantity_update.sql).
 
 -- Returns { duplicate: true } when delivery_code already belongs to another
 -- store. Otherwise { delivery, appending, accepted_items, rejected_items }:
@@ -195,7 +202,10 @@ $$;
 
 -- Returns null when p_item_id isn't under p_delivery_code. Otherwise
 -- { item, update }; update is null when the quantity didn't change — a
--- no-op isn't audited.
+-- no-op isn't audited, and it leaves the total alone too. A changed quantity
+-- recalculates the total as round(Qty × Unit/Box × Sales Price, 2) (the
+-- receipt's arithmetic, main-file.md §4), unless Unit/Box or the price is
+-- missing, and the history row keeps the total before and after.
 create or replace function public.update_delivery_item_quantity(
   p_delivery_code text,
   p_item_id uuid,
@@ -206,13 +216,13 @@ language plpgsql
 set search_path = ''
 as $$
 declare
-  v_previous numeric;
+  v_before public.delivery_items;
   v_item public.delivery_items;
   v_update jsonb;
 begin
   -- Locked so two concurrent corrections can't both read the same
-  -- previous_quantity.
-  select quantity into v_previous
+  -- previous quantity and total.
+  select * into v_before
   from public.delivery_items
   where id = p_item_id and delivery_code = p_delivery_code
   for update;
@@ -221,20 +231,34 @@ begin
     return null;
   end if;
 
+  -- Resubmitting the same quantity changes nothing. Recalculating here would
+  -- silently replace a printed total that was off by rounding, with no
+  -- history row to show it.
+  if v_before.quantity is not distinct from p_quantity then
+    return jsonb_build_object(
+      'item', to_jsonb(v_before) - 'dedupe_key',
+      'update', null
+    );
+  end if;
+
   update public.delivery_items
-  set quantity = p_quantity
+  set quantity = p_quantity,
+      total_item_price = case
+        when unit_count is null or item_price is null then total_item_price
+        else round(p_quantity * unit_count * item_price, 2)
+      end
   where id = p_item_id
   returning * into v_item;
 
-  if v_previous is distinct from p_quantity then
-    insert into public.delivery_item_updates as u (
-      item_id, delivery_code, store_code, previous_quantity, new_quantity, reason
-    )
-    values (
-      p_item_id, p_delivery_code, v_item.store_code, v_previous, p_quantity, p_reason
-    )
-    returning to_jsonb(u) into v_update;
-  end if;
+  insert into public.delivery_item_updates as u (
+    item_id, delivery_code, store_code, previous_quantity, new_quantity,
+    previous_total_item_price, new_total_item_price, reason
+  )
+  values (
+    p_item_id, p_delivery_code, v_item.store_code, v_before.quantity, p_quantity,
+    v_before.total_item_price, v_item.total_item_price, p_reason
+  )
+  returning to_jsonb(u) into v_update;
 
   return jsonb_build_object(
     'item', to_jsonb(v_item) - 'dedupe_key',
