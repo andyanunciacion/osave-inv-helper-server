@@ -165,9 +165,8 @@ sibling fill. Still uncovered:
   `delivery_date_inferred`) matches in both. Still different: the
   frontend's copy is missing all of §8 (quantity PATCH); this copy is
   missing the frontend's newer §2 wording (merges keep `status: "success"`,
-  shown on the batch summary), and its §8 still says the quantity PATCH has
-  "no frontend hook yet" (the frontend's #23 added one); §9 (delivery note)
-  is written from each side. Merge them into one text and copy it to both
+  shown on the batch summary); §9 (delivery note) is written from each side.
+  (This copy's §8 was brought up to date by #42, the total recalculation.) Merge them into one text and copy it to both
   repos.
 
 ## 7. Deleting a confirmed delivery or item
@@ -200,7 +199,10 @@ For anyone reading this later wondering why these *aren't* on the list:
 - Every migration in `supabase/migrations/` has been applied to the Supabase
   project, including `atomic_delivery_writes` (`#17`) — the
   `update_delivery_item_quantity` function answered a no-match call on
-  2026-10-12.
+  2026-10-12 — and `recalculate_total_on_quantity_update` (`#42`,
+  2026-10-18): a 2 → 3 correction on item 3179 set its total to ₱4,068.00
+  and the history row kept ₱2,712.00 → ₱4,068.00; a same-quantity call
+  returned `update: null` with the total unchanged.
 - Delivery note (`#19`, `frontend-contract.md` §9): `add_delivery_note` applied
   to the Supabase project 2026-10-12; the column and the PATCH's update query
   were checked against it (a non-matching code returns no row → 404). A real

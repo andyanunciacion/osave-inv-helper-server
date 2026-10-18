@@ -445,12 +445,21 @@ a hook-internals change, still without touching call sites.
 
 ## 8. Write path — correcting a delivered item's quantity
 
-**As built — no frontend hook yet** (this endpoint has no corresponding
-`features/deliveries/hooks/*` call site as of 2026-09-22; add one here once
-the frontend grows an edit UI). Added per `main-file.md` §12's "edit log"
-suggestion — deliberately scoped to **quantity only**, not a general item
-PATCH: `item_code`, `item_name`, `unit`, `item_price`, `total_item_price`,
-etc. stay immutable through this route.
+**As built.** The frontend's #23 calls it from the expanded item row in
+search results (`ItemHistoryPanel`, `useQuantityCorrection` /
+`useUpdateItemQuantity` / `useItemHistory` in `features/deliveries/hooks/`).
+Added per `main-file.md` §12's "edit log" suggestion — deliberately scoped to
+**quantity only**, not a general item PATCH: `item_code`, `item_name`,
+`unit`, `unit_count` and `item_price` stay immutable through this route.
+
+**The total follows the quantity** (since
+`supabase/migrations/20261018000000_recalculate_total_on_quantity_update.sql`):
+a changed quantity sets `total_item_price` to
+`round(quantity × unit_count × item_price, 2)` — the receipt's own
+arithmetic, the same one the review screen's `withAutoTotal` /
+`hasPriceMismatch` use — in the same transaction. With `unit_count` or
+`item_price` missing, the total is left as it was. The history row keeps the
+total before and after, so the printed amount isn't lost.
 
 **`PATCH /api/deliveries/:delivery_code/items/:item_id`**
 
@@ -467,14 +476,19 @@ interface DeliveryItemUpdate {
   store_code: string;
   previous_quantity: number | null;
   new_quantity: number;
+  // null on rows written before the total was recalculated; equal to each
+  // other when unit_count or item_price is missing
+  previous_total_item_price: number | null;
+  new_total_item_price: number | null;
   reason: string | null;
   created_at: string;
 }
 
 interface UpdateItemQuantityResult {
-  item: DeliveryItem;              // the row after the update
+  item: DeliveryItem;              // the row after the update, new total included
   update: DeliveryItemUpdate | null; // null when `quantity` matched the
                                       // existing value — a no-op isn't audited
+                                      // and leaves the total alone
 }
 ```
 
