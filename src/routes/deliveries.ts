@@ -17,7 +17,7 @@ const DELIVERY_ITEM_COLUMNS =
   "id, delivery_code, store_code, item_code, item_name, unit_count, quantity, unit, item_price, total_item_price, raw_ocr_text, created_at";
 
 const DELIVERY_ITEM_UPDATE_COLUMNS =
-  "id, item_id, delivery_code, store_code, previous_quantity, new_quantity, reason, created_at";
+  "id, item_id, delivery_code, store_code, previous_quantity, new_quantity, previous_total_item_price, new_total_item_price, reason, created_at";
 
 interface MergedItemInfo {
   item_code: string | null;
@@ -284,11 +284,12 @@ deliveriesRouter.patch("/:delivery_code/items/:item_id", async (req, res) => {
     return res.status(404).json({ error: "not_found", message: "delivery item not found" });
   }
 
-  // The quantity change and its history row are one transaction
-  // (supabase/migrations/20261008000000_atomic_delivery_writes.sql), so a
-  // failed audit insert can't leave the new quantity behind unrecorded.
-  // No-op corrections (resubmitting the same value) don't get a history row —
-  // there's nothing that actually changed to audit.
+  // The quantity change, the total it recalculates (Qty × Unit/Box × Sales
+  // Price, kept as is when either is missing) and its history row are one
+  // transaction (supabase/migrations/20261018000000_recalculate_total_on_quantity_update.sql),
+  // so a failed audit insert can't leave the new quantity behind unrecorded.
+  // No-op corrections (resubmitting the same value) change nothing, total
+  // included, and don't get a history row.
   const { data: result, error } = await supabase.rpc("update_delivery_item_quantity", {
     p_delivery_code: delivery_code,
     p_item_id: item_id,
